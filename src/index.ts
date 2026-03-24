@@ -153,3 +153,35 @@ export { CoreAdapter } from './integrations/CoreAdapter';
 export type { CoreAdapterConfig } from './integrations/CoreAdapter';
 export { PaymentsAdapter } from './integrations/PaymentsAdapter';
 export type { PaymentsAdapterConfig } from './integrations/PaymentsAdapter';
+
+// ── Policy ──
+export { PolicyEngine, blockSafetyClasses, requireApprovalFor, maxRunSpendUSD, maxTokenBudget, allowChains } from './policy';
+export type { PolicyRule, PolicyContext } from './policy';
+
+// ── Approvals ──
+export { ApprovalManager } from './approvals';
+export type { ApprovalMode, ApprovalRequest, ApprovalDecision, ApprovalHandler, ApprovalRoute } from './approvals';
+
+// ── Audit ──
+export { AuditEmitter, InMemoryAuditSink } from './audit';
+export type { AuditBundle, ToolExecutionSummary, AuditExportFormat, AuditSink } from './audit';
+
+// ── Testing ──
+export { ReplayProvider, TraceRecorder, compareTraces, serializeGoldenTrace, deserializeGoldenTrace } from './testing';
+export type { RecordedInteraction, GoldenTrace, TraceComparisonResult, EventDiff } from './testing';
+
+// ── Transports ──
+export { MCPServerTransport, ACPTransport, A2ATransport } from './transports';
+export type {
+  Transport,
+  TransportState,
+  MCPToolDefinition,
+  MCPToolCall,
+  MCPToolResponse,
+  ACPCapability,
+  ACPTaskRequest,
+  ACPTaskResponse,
+  A2AAgentCard,
+  A2ATask,
+  A2ATaskResult,
+} from './transports';

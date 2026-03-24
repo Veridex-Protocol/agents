@@ -95,7 +95,7 @@ export class AnthropicProvider implements ModelProvider {
     const nonSystemMessages = messages.filter((m) => m.role !== 'system');
     const systemPrompt = systemMessages.map((m) => m.content).join('\n\n');
 
-    const params: import('@anthropic-ai/sdk').MessageCreateParams = {
+    const params: import('@anthropic-ai/sdk').Anthropic.MessageCreateParams = {
       model: this.config.model!,
       messages: nonSystemMessages.map((m) => this.formatMessage(m)),
       max_tokens: options?.maxOutputTokens ?? this.config.defaultMaxOutputTokens ?? 4096,
@@ -114,15 +114,15 @@ export class AnthropicProvider implements ModelProvider {
       params.tools = options.tools.map((t) => this.formatTool(t));
     }
 
-    const requestOptions: import('@anthropic-ai/sdk').RequestOptions = {};
+    const requestOptions: import('@anthropic-ai/sdk').Anthropic.RequestOptions = {};
     if (options?.signal) {
       requestOptions.signal = options.signal;
     }
 
     // Streaming path — when onToken callback is provided
     if (options?.onToken) {
-      params.stream = true;
-      const stream = await client.messages.create(params, requestOptions);
+      const streamParams = { ...params, stream: true as const };
+      const stream = await client.messages.create(streamParams, requestOptions);
 
       let textContent = '';
       const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
@@ -134,7 +134,7 @@ export class AnthropicProvider implements ModelProvider {
       let stopReason: string | null = null;
       let model = this.config.model!;
 
-      for await (const event of stream as AsyncIterable<import('@anthropic-ai/sdk').MessageStreamEvent>) {
+      for await (const event of stream as unknown as AsyncIterable<import('@anthropic-ai/sdk').Anthropic.MessageStreamEvent>) {
         switch (event.type) {
           case 'message_start':
             if (event.message?.usage) {
@@ -209,7 +209,7 @@ export class AnthropicProvider implements ModelProvider {
 
   private formatMessage(
     msg: ModelMessage,
-  ): import('@anthropic-ai/sdk').MessageParam {
+  ): import('@anthropic-ai/sdk').Anthropic.MessageParam {
     // Tool result messages → Anthropic expects them as user messages with tool_result content
     if (msg.role === 'tool') {
       return {
@@ -224,7 +224,7 @@ export class AnthropicProvider implements ModelProvider {
 
     // Assistant messages with tool calls → content blocks
     if (msg.role === 'assistant' && msg.toolCalls?.length) {
-      const content: import('@anthropic-ai/sdk').ContentBlockParam[] = [];
+      const content: import('@anthropic-ai/sdk').Anthropic.ContentBlockParam[] = [];
       if (msg.content) {
         content.push({ type: 'text', text: msg.content });
       }
@@ -248,7 +248,7 @@ export class AnthropicProvider implements ModelProvider {
 
   private formatTool(
     tool: ModelToolDefinition,
-  ): import('@anthropic-ai/sdk').Tool {
+  ): import('@anthropic-ai/sdk').Anthropic.Tool {
     return {
       name: tool.name,
       description: tool.description,
@@ -260,7 +260,7 @@ export class AnthropicProvider implements ModelProvider {
   }
 
   private parseResponse(
-    message: import('@anthropic-ai/sdk').Message,
+    message: import('@anthropic-ai/sdk').Anthropic.Message,
   ): ModelResponse {
     let textContent = '';
     const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];

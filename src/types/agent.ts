@@ -90,4 +90,10 @@ export interface RuntimeOptions {
   memoryStore?: unknown;
   /** External event handler */
   onEvent?: (event: unknown) => void;
+  /** Policy rules to register on the engine */
+  policyRules?: unknown[];
+  /** Approval routes to register */
+  approvalRoutes?: unknown[];
+  /** Audit sinks to register */
+  auditSinks?: unknown[];
 }

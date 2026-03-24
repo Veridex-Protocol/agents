@@ -135,7 +135,7 @@ export class OpenAIProvider implements ModelProvider {
       let promptTokens = 0;
       let completionTokens = 0;
 
-      for await (const chunk of stream as AsyncIterable<import('openai').ChatCompletionChunk>) {
+      for await (const chunk of stream as AsyncIterable<import('openai').OpenAI.ChatCompletionChunk>) {
         const delta = chunk.choices[0]?.delta;
         if (chunk.model) model = chunk.model;
 
@@ -203,12 +203,12 @@ export class OpenAIProvider implements ModelProvider {
     // Non-streaming path
     const completion = await client.chat.completions.create(params, requestOptions);
 
-    return this.parseResponse(completion as import('openai').ChatCompletion);
+    return this.parseResponse(completion as import('openai').OpenAI.ChatCompletion);
   }
 
   private formatMessage(
     msg: ModelMessage,
-  ): import('openai').ChatCompletionMessageParam {
+  ): import('openai').OpenAI.ChatCompletionMessageParam {
     if (msg.role === 'system') {
       return { role: 'system', content: msg.content };
     }
@@ -226,7 +226,7 @@ export class OpenAIProvider implements ModelProvider {
     }
 
     // assistant
-    const assistantMsg: import('openai').ChatCompletionAssistantMessageParam = {
+    const assistantMsg: import('openai').OpenAI.ChatCompletionAssistantMessageParam = {
       role: 'assistant',
       content: msg.content || null,
     };
@@ -244,7 +244,7 @@ export class OpenAIProvider implements ModelProvider {
 
   private formatTool(
     tool: ModelToolDefinition,
-  ): import('openai').ChatCompletionTool {
+  ): import('openai').OpenAI.ChatCompletionTool {
     return {
       type: 'function',
       function: {
@@ -256,7 +256,7 @@ export class OpenAIProvider implements ModelProvider {
   }
 
   private parseResponse(
-    completion: import('openai').ChatCompletion,
+    completion: import('openai').OpenAI.ChatCompletion,
   ): ModelResponse {
     const choice = completion.choices[0];
     const message = choice?.message;

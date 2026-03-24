@@ -8,7 +8,6 @@
  */
 
 import { zodToJsonSchema } from 'zod-to-json-schema';
-import type { ZodType } from 'zod';
 import type {
   AgentDefinition,
   RuntimeOptions,
@@ -44,8 +43,14 @@ import { MemoryManager } from '../memory/MemoryManager';
 import { CheckpointManager } from '../checkpoints/CheckpointManager';
 import { CoreAdapter } from '../integrations/CoreAdapter';
 import { PaymentsAdapter } from '../integrations/PaymentsAdapter';
+import { PolicyEngine } from '../policy';
+import { ApprovalManager } from '../approvals';
+import { AuditEmitter } from '../audit';
 import type { CheckpointStore } from '../checkpoints/CheckpointManager';
 import type { MemoryStore } from '../types/memory';
+import type { PolicyRule } from '../policy';
+import type { ApprovalRoute } from '../approvals';
+import type { AuditSink } from '../audit';
 
 /** Generate a unique event ID. */
 function eventId(): string {
@@ -70,6 +75,11 @@ export class AgentRuntime {
   // Integrations
   readonly core: CoreAdapter | null;
   readonly payments: PaymentsAdapter | null;
+
+  // Governance
+  readonly policyEngine: PolicyEngine;
+  readonly approvals: ApprovalManager;
+  readonly audit: AuditEmitter;
 
   // Config
   private enableTracing: boolean;
@@ -144,6 +154,32 @@ export class AgentRuntime {
     this.enableTracing = options?.enableTracing !== false;
     this.enableCheckpoints = options?.enableCheckpoints === true;
     this.onEvent = options?.onEvent as ((event: unknown) => void) | undefined;
+
+    // Governance
+    this.policyEngine = new PolicyEngine();
+    this.approvals = new ApprovalManager();
+    this.audit = new AuditEmitter();
+
+    // Register policy rules from options
+    if (options?.policyRules) {
+      for (const rule of options.policyRules as PolicyRule[]) {
+        this.policyEngine.register(rule);
+      }
+    }
+
+    // Register approval routes from options
+    if (options?.approvalRoutes) {
+      for (const route of options.approvalRoutes as ApprovalRoute[]) {
+        this.approvals.addRoute(route);
+      }
+    }
+
+    // Register audit sinks from options
+    if (options?.auditSinks) {
+      for (const sink of options.auditSinks as AuditSink[]) {
+        this.audit.addSink(sink);
+      }
+    }
 
     // Wire event forwarding
     if (this.onEvent) {
@@ -431,9 +467,13 @@ export class AgentRuntime {
     const input = tool.input;
     // Check if it's a Zod schema (has ._def or .parse method)
     if (input && typeof input === 'object' && '_def' in input) {
-      const schema = zodToJsonSchema(input as ZodType, { target: 'openApi3' });
-      // zodToJsonSchema wraps in { $schema, ...rest } — strip $schema for model consumption
-      const { $schema: _$schema, ...rest } = schema as Record<string, unknown>;
+      // Cast via unknown to break deep Zod generic type chain (TS2589 in DTS generation)
+      const convert = zodToJsonSchema as unknown as (
+        schema: Record<string, unknown>,
+        options: { target: string },
+      ) => Record<string, unknown>;
+      const schema = convert(input as Record<string, unknown>, { target: 'openApi3' });
+      const { $schema: _$schema, ...rest } = schema;
       return rest;
     }
     // Already JSON Schema
@@ -469,6 +509,49 @@ export class AgentRuntime {
   ): Promise<unknown> {
     switch (proposal.type) {
       case 'tool_call': {
+        // ── Policy Evaluation ──
+        if (this.policyEngine.list().length > 0) {
+          const policyContext = {
+            agentId: this.definition.id,
+            runId: run.id,
+            turnIndex,
+            proposal,
+            runSpendUSD: 0,
+            totalTokens: run.totalUsage.totalTokens,
+          };
+
+          const decision = await this.policyEngine.evaluate(policyContext);
+
+          this.emitEvent({
+            id: eventId(),
+            type: 'policy_evaluated',
+            runId: run.id,
+            agentId: this.definition.id,
+            turnIndex,
+            timestamp: Date.now(),
+            data: { verdict: decision.verdict, riskScore: decision.riskScore, reasons: decision.reasons },
+          } as TraceEvent);
+
+          if (decision.verdict === 'block') {
+            return { blocked: true, reasons: decision.reasons };
+          }
+
+          if (decision.verdict === 'escalate') {
+            // Route through approval manager
+            const approvalDecision = await this.approvals.requestApproval(
+              run.id,
+              this.definition.id,
+              turnIndex,
+              proposal,
+              decision,
+            );
+
+            if (!approvalDecision.approved) {
+              return { blocked: true, reasons: [`Approval denied: ${approvalDecision.reason}`] };
+            }
+          }
+        }
+
         const context = {
           runId: run.id,
           agentId: this.definition.id,
@@ -551,11 +634,44 @@ export class AgentRuntime {
 
   /** Build the final run result. */
   private buildRunResult(run: Run): RunResult {
+    // Emit audit bundle (fire-and-forget)
+    this.emitAuditBundle(run).catch(() => {});
+
     return {
       run,
       output: run.output ?? run.error ?? '',
       events: this.eventLog.getByRun(run.id),
       usage: run.totalUsage,
     };
+  }
+
+  /** Emit an audit bundle for a completed run. */
+  private async emitAuditBundle(run: Run): Promise<void> {
+    const toolExecutions = run.turns
+      .filter((t) => t.proposal.type === 'tool_call')
+      .flatMap((t, turnIdx) => {
+        const results = t.result as Array<{ toolCall: ToolCall; result: { llmOutput: string; success?: boolean }; durationMs: number }> | undefined;
+        return (results ?? []).map((r) => ({
+          toolName: r.toolCall.name,
+          turnIndex: turnIdx,
+          success: r.result.success !== false,
+          durationMs: r.durationMs,
+        }));
+      });
+
+    await this.audit.emit({
+      runId: run.id,
+      agentId: this.definition.id,
+      runStartedAt: run.createdAt,
+      runEndedAt: run.updatedAt,
+      finalState: run.state,
+      totalUsage: run.totalUsage,
+      totalSpendUSD: 0,
+      turnCount: run.turns.length,
+      events: this.eventLog.getByRun(run.id),
+      policyDecisions: [],
+      approvalDecisions: [],
+      toolExecutions,
+    });
   }
 }
