@@ -21,6 +21,7 @@ export interface ToolOptions<TInput, TOutput> {
   idempotent?: boolean;
   permissions?: string[];
   costEstimate?: (input: TInput) => CostEstimate;
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -54,5 +55,6 @@ export function tool<TInput = unknown, TOutput = unknown>(
     idempotent: options.idempotent,
     permissions: options.permissions,
     costEstimate: options.costEstimate,
+    metadata: options.metadata,
   };
 }

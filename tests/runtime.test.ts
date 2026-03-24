@@ -3,9 +3,12 @@ import { z } from 'zod';
 import { AgentRuntime } from '../src/runtime/AgentRuntime';
 import { createAgent } from '../src/runtime/createAgent';
 import { tool } from '../src/tools/tool';
+import { InMemoryStore } from '../src/memory/InMemoryStore';
+import { InMemoryCheckpointStore } from '../src/checkpoints/CheckpointManager';
 import type { ModelProvider, ModelResponse, ModelMessage, ModelCompletionOptions } from '../src/types/models';
 import type { AgentDefinition } from '../src/types/agent';
 import type { TraceEvent, RunStartedEvent, RunCompletedEvent } from '../src/types/events';
+import type { PolicyRule } from '../src/policy';
 
 /** Create a mock model provider that returns configured responses. */
 function mockProvider(responses: ModelResponse[]): ModelProvider {
@@ -218,6 +221,50 @@ describe('AgentRuntime', () => {
       expect((toolEvent as any).data.success).toBe(true);
     });
 
+    it('emits context_compiled events with bounded runtime context', async () => {
+      const memoryStore = new InMemoryStore();
+      await memoryStore.write({
+        entry: {
+          tier: 'semantic',
+          content: 'The customer is Acme Corp.',
+          provenance: 'system',
+          confidence: 0.9,
+          scope: 'agent',
+          ttlMs: 0,
+          tags: ['crm'],
+        },
+        overwriteStrategy: 'skip',
+      });
+
+      const searchTool = tool({
+        name: 'searchDocs',
+        description: 'Search internal documents',
+        input: z.object({ query: z.string() }),
+        safetyClass: 'read',
+        execute: async () => ({ llmOutput: 'found', success: true }),
+      });
+
+      const provider = mockProvider([makeResponse('done')]);
+      const runtime = new AgentRuntime(makeDefinition({ tools: [searchTool] }), {
+        modelProviders: { mock: provider },
+        memoryStore,
+      });
+
+      await runtime.run('What do we know about Acme?', { tenant: 'acme' });
+
+      const firstCallMessages = (provider.complete as ReturnType<typeof vi.fn>).mock.calls[0][0] as ModelMessage[];
+      const systemContext = firstCallMessages.find(
+        (message, index) => message.role === 'system' && index > 0,
+      );
+      expect(systemContext?.content).toContain('Runtime context:');
+      expect(systemContext?.content).toContain('The customer is Acme Corp.');
+      expect(systemContext?.content).toContain('searchDocs');
+
+      const contextEvent = runtime.eventLog.getByRun(runtime.eventLog.getAll()[0].runId)
+        .find((event) => event.type === 'context_compiled');
+      expect(contextEvent).toBeDefined();
+    });
+
     it('records events in eventLog', async () => {
       const provider = mockProvider([makeResponse('done')]);
       const runtime = new AgentRuntime(makeDefinition(), {
@@ -294,6 +341,144 @@ describe('AgentRuntime', () => {
 
       expect(result.run.state).toBe('failed');
       expect(result.run.error).toContain('Turn 0 denied');
+    });
+  });
+
+  describe('durable approvals', () => {
+    it('suspends a run and checkpoints when approval is required', async () => {
+      const checkpointStore = new InMemoryCheckpointStore();
+      const transfer = tool({
+        name: 'transferFunds',
+        description: 'Move treasury funds',
+        input: z.object({ amount: z.number() }),
+        safetyClass: 'financial',
+        execute: async ({ input }) => ({
+          llmOutput: `Transferred ${input.amount}`,
+          success: true,
+          metrics: { costUSD: input.amount },
+        }),
+      });
+
+      const approvalRule: PolicyRule = {
+        id: 'approval-required',
+        name: 'Approval required',
+        description: 'Escalate all tool calls',
+        evaluate: async () => ({
+          ruleId: 'approval-required',
+          ruleName: 'Approval required',
+          passed: false,
+          verdict: 'escalate',
+          reason: 'Needs approval',
+          riskContribution: 0.9,
+        }),
+      };
+
+      const provider = mockProvider([
+        makeToolCallResponse([{ name: 'transferFunds', args: { amount: 5 } }]),
+      ]);
+
+      const runtime = new AgentRuntime(makeDefinition({ tools: [transfer] }), {
+        modelProviders: { mock: provider },
+        policyRules: [approvalRule],
+        enableCheckpoints: true,
+        checkpointStore,
+      });
+
+      const result = await runtime.run('Move $5');
+
+      expect(result.run.state).toBe('waiting_for_approval');
+      expect(result.run.turns).toHaveLength(1);
+      expect(await runtime.listCheckpoints(result.run.id)).toHaveLength(1);
+      expect(result.events.some((event) => event.type === 'approval_requested')).toBe(true);
+    });
+
+    it('resumes from a checkpoint and executes the approved tool call', async () => {
+      const checkpointStore = new InMemoryCheckpointStore();
+      const transfer = tool({
+        name: 'transferFunds',
+        description: 'Move treasury funds',
+        input: z.object({ amount: z.number() }),
+        safetyClass: 'financial',
+        execute: async ({ input }) => ({
+          llmOutput: `Transferred ${input.amount}`,
+          success: true,
+          metrics: { costUSD: input.amount },
+        }),
+      });
+
+      const approvalRule: PolicyRule = {
+        id: 'approval-required',
+        name: 'Approval required',
+        description: 'Escalate all tool calls',
+        evaluate: async () => ({
+          ruleId: 'approval-required',
+          ruleName: 'Approval required',
+          passed: false,
+          verdict: 'escalate',
+          reason: 'Needs approval',
+          riskContribution: 0.9,
+        }),
+      };
+
+      const provider = mockProvider([
+        makeToolCallResponse([{ name: 'transferFunds', args: { amount: 5 } }]),
+        makeResponse('Transfer completed and logged.'),
+      ]);
+
+      const runtime = new AgentRuntime(makeDefinition({ tools: [transfer] }), {
+        modelProviders: { mock: provider },
+        policyRules: [approvalRule],
+        enableCheckpoints: true,
+        checkpointStore,
+      });
+
+      const suspended = await runtime.run('Move $5');
+      const checkpoint = (await runtime.listCheckpoints(suspended.run.id))[0];
+
+      const resumed = await runtime.resumeFromCheckpoint(checkpoint.id, {
+        approval: {
+          approved: true,
+          approver: 'finance-team',
+          requestId: (suspended.run.turns[0].result as { requestId?: string }).requestId,
+        },
+      });
+
+      expect(resumed.run.state).toBe('completed');
+      expect(resumed.output).toBe('Transfer completed and logged.');
+      expect(Array.isArray(resumed.run.turns[0].result)).toBe(true);
+      expect(runtime.getLatestContextPlan(resumed.run.id)).toBeTruthy();
+    });
+  });
+
+  describe('live handoffs', () => {
+    it('completes a run through a registered handoff handler', async () => {
+      const provider = mockProvider([
+        makeResponse('', {
+          finishReason: 'stop',
+          content: JSON.stringify({
+            type: 'handoff',
+            targetAgentId: 'external-support',
+            reason: 'Need billing support',
+            context: 'Customer asked for a refund.',
+          }),
+        }),
+      ]);
+
+      const runtime = new AgentRuntime(makeDefinition(), {
+        modelProviders: { mock: provider },
+        handoffHandlers: {
+          'external-support': async ({ reason, context }) => ({
+            success: true,
+            output: `${reason}: ${context}`,
+          }),
+        },
+      });
+
+      const result = await runtime.run('Help this customer');
+
+      expect(result.run.state).toBe('completed');
+      expect(result.output).toBe('Need billing support: Customer asked for a refund.');
+      expect(result.events.some((event) => event.type === 'handoff_initiated')).toBe(true);
     });
   });
 
@@ -428,6 +613,86 @@ describe('AgentRuntime', () => {
 
       // Should still complete — failed tool results are passed back to model
       expect(result.run.turns[0].proposal.type).toBe('tool_call');
+    });
+
+    it('tracks spend from financial tools and emits payment events', async () => {
+      const payTool = tool({
+        name: 'payInvoice',
+        description: 'Pay an invoice',
+        input: z.object({ recipient: z.string(), chain: z.string() }),
+        safetyClass: 'financial',
+        costEstimate: () => ({ estimatedUSD: 5, confidence: 0.9 }),
+        async execute() {
+          return {
+            llmOutput: 'Invoice paid',
+            success: true,
+            metrics: { durationMs: 25, costUSD: 4.25 },
+          };
+        },
+      });
+
+      const provider = mockProvider([
+        makeToolCallResponse([{ name: 'payInvoice', args: { recipient: 'vendor_1', chain: 'base', protocol: 'x402' } }]),
+        makeResponse('Paid successfully'),
+      ]);
+
+      const runtime = new AgentRuntime(
+        makeDefinition({
+          tools: [payTool],
+          payments: { perTransactionLimitUSD: 10, dailyLimitUSD: 100 },
+        }),
+        {
+          modelProviders: { mock: provider },
+          agentWallet: {},
+        },
+      );
+
+      await runtime.run('Pay invoice #123');
+
+      expect(runtime.payments?.getRunSpend()).toBe(4.25);
+      const paymentEvent = runtime.eventLog.getAll().find((event) => event.type === 'payment_attempted');
+      expect(paymentEvent).toBeDefined();
+      expect((paymentEvent as any).data.amountUSD).toBe(4.25);
+      expect((paymentEvent as any).data.protocol).toBe('x402');
+    });
+
+    it('blocks execution when estimated spend exceeds the configured budget', async () => {
+      const expensiveTool = tool({
+        name: 'expensiveAction',
+        description: 'Runs an expensive action',
+        input: z.object({}),
+        safetyClass: 'financial',
+        costEstimate: () => ({ estimatedUSD: 25, confidence: 0.95 }),
+        execute: async () => ({
+          llmOutput: 'should never execute',
+          success: true,
+        }),
+      });
+
+      const provider = mockProvider([
+        makeToolCallResponse([{ name: 'expensiveAction', args: {} }]),
+        makeResponse('Budget prevented the spend'),
+      ]);
+
+      const runtime = new AgentRuntime(
+        makeDefinition({
+          tools: [expensiveTool],
+          payments: { perTransactionLimitUSD: 10 },
+        }),
+        {
+          modelProviders: { mock: provider },
+          agentWallet: {},
+        },
+      );
+
+      const result = await runtime.run('Try the expensive action');
+
+      expect(result.run.turns[0].proposal.type).toBe('tool_call');
+      expect(result.run.turns[0].result).toMatchObject({
+        blocked: true,
+        estimatedSpendUSD: 25,
+      });
+      expect(runtime.payments?.getRunSpend()).toBe(0);
     });
   });
 

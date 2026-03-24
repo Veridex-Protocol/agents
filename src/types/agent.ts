@@ -10,6 +10,7 @@
 
 import type { z } from 'zod';
 import type { ToolContract } from './tools';
+import type { ToolAttachment } from './tools';
 import type { MemoryConfig } from './memory';
 import type { RuntimeHook } from './hooks';
 import type { ModelConfig } from './models';
@@ -70,6 +71,49 @@ export interface PolicyConfig {
   params: Record<string, unknown>;
 }
 
+// ── Handoff Runtime ──
+
+/** Context passed to a live handoff handler when another agent/runtime is invoked. */
+export interface HandoffExecutionContext {
+  /** Current run identifier */
+  runId: string;
+  /** Local agent identifier */
+  agentId: string;
+  /** Current turn index */
+  turnIndex: number;
+  /** Target handoff identifier */
+  targetAgentId: string;
+  /** Human/model-provided handoff reason */
+  reason: string;
+  /** Optional context string to forward */
+  context?: string;
+  /** Veridex SDK if available */
+  sdk?: unknown;
+  /** Agent wallet if available */
+  wallet?: unknown;
+}
+
+/** Result returned by a live handoff handler. */
+export interface HandoffExecutionResult {
+  /** Whether the handoff completed successfully */
+  success: boolean;
+  /** Output to feed back as the run's final output */
+  output: string;
+  /** Optional UI-facing output */
+  uiOutput?: string;
+  /** Optional structured metadata */
+  metadata?: Record<string, unknown>;
+  /** Optional attachments returned by the remote runtime */
+  attachments?: ToolAttachment[];
+  /** Optional error message for failed handoffs */
+  error?: string;
+}
+
+/** Handler for executing a live agent handoff to another runtime or remote agent. */
+export type HandoffHandler = (
+  context: HandoffExecutionContext,
+) => Promise<HandoffExecutionResult>;
+
 // ── Runtime Options ──
 
 /** Options for configuring the agent runtime. */
@@ -96,4 +140,6 @@ export interface RuntimeOptions {
   approvalRoutes?: unknown[];
   /** Audit sinks to register */
   auditSinks?: unknown[];
+  /** Live handoff handlers keyed by target agent/runtime identifier */
+  handoffHandlers?: Record<string, HandoffHandler>;
 }

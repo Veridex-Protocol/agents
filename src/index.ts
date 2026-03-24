@@ -42,6 +42,9 @@ export type {
   AgentDefinition,
   PaymentConfig,
   PolicyConfig,
+  HandoffExecutionContext,
+  HandoffExecutionResult,
+  HandoffHandler,
   RuntimeOptions,
   // Runtime
   Run,
@@ -49,6 +52,8 @@ export type {
   Turn,
   TurnResult,
   RunResult,
+  ResumeRunOptions,
+  RunCheckpointState,
   // Tools
   ToolContract,
   ToolResult,
@@ -181,7 +186,11 @@ export type {
   ACPCapability,
   ACPTaskRequest,
   ACPTaskResponse,
+  ACPTransportConfig,
+  TransportAuthConfig,
+  TransportRequestOptions,
   A2AAgentCard,
   A2ATask,
   A2ATaskResult,
+  A2ATransportConfig,
 } from './transports';

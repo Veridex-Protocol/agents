@@ -50,6 +50,11 @@ export interface ApprovalRoute {
   timeoutMs?: number;
 }
 
+export interface ApprovalStartResult {
+  request: ApprovalRequest;
+  decision?: ApprovalDecision;
+}
+
 // ── Approval Manager ──
 
 export class ApprovalManager {
@@ -104,17 +109,30 @@ export class ApprovalManager {
     proposal: ActionProposal,
     policyDecision: PolicyDecision,
   ): Promise<ApprovalDecision> {
-    // Determine approval mode from routes
+    const started = await this.startApproval(
+      runId,
+      agentId,
+      turnIndex,
+      proposal,
+      policyDecision,
+      { autoResolve: true },
+    );
+    return started.decision!;
+  }
+
+  /** Determine the approval mode for a proposal/policy pair. */
+  determineMode(
+    proposal: ActionProposal,
+    policyDecision: PolicyDecision,
+  ): ApprovalMode {
     let mode: ApprovalMode = 'auto_allow';
 
-    // Default escalation: blocked → auto_block, escalated → human_required
     if (policyDecision.verdict === 'block') {
       mode = 'auto_block';
     } else if (policyDecision.verdict === 'escalate') {
       mode = 'human_required';
     }
 
-    // Check custom routes (override defaults)
     for (const route of this.routes) {
       if (route.match(proposal, policyDecision)) {
         mode = route.mode;
@@ -122,6 +140,24 @@ export class ApprovalManager {
       }
     }
 
+    return mode;
+  }
+
+  /**
+   * Start an approval workflow without necessarily resolving it immediately.
+   *
+   * This is used by the runtime to durably suspend high-risk runs while still
+   * letting auto-allow / auto-block modes resolve synchronously.
+   */
+  async startApproval(
+    runId: string,
+    agentId: string,
+    turnIndex: number,
+    proposal: ActionProposal,
+    policyDecision: PolicyDecision,
+    options?: { autoResolve?: boolean },
+  ): Promise<ApprovalStartResult> {
+    const mode = this.determineMode(proposal, policyDecision);
     const request: ApprovalRequest = {
       id: `apr_${++this.requestCounter}_${Date.now()}`,
       runId,
@@ -136,10 +172,17 @@ export class ApprovalManager {
 
     this.pendingRequests.set(request.id, request);
 
-    // Get handler for this mode
+    const shouldAutoResolve =
+      options?.autoResolve !== false ||
+      mode === 'auto_allow' ||
+      mode === 'auto_block';
+
+    if (!shouldAutoResolve) {
+      return { request };
+    }
+
     const handler = this.handlers.get(mode);
     if (!handler) {
-      // No handler registered — default to block
       const decision: ApprovalDecision = {
         requestId: request.id,
         approved: false,
@@ -149,13 +192,13 @@ export class ApprovalManager {
       };
       this.pendingRequests.delete(request.id);
       this.decisions.set(request.id, decision);
-      return decision;
+      return { request, decision };
     }
 
     const decision = await handler(request);
     this.pendingRequests.delete(request.id);
     this.decisions.set(request.id, decision);
-    return decision;
+    return { request, decision };
   }
 
   /** Get all pending approval requests. */

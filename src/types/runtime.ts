@@ -102,3 +102,22 @@ export interface RunResult {
   /** Total model usage */
   usage: ModelUsage;
 }
+
+/** Approval or operator input used to resume a suspended run. */
+export interface ResumeRunOptions {
+  /** Optional approval resolution to apply before resuming. */
+  approval?: {
+    requestId?: string;
+    approved: boolean;
+    approver?: string;
+    reason?: string;
+  };
+}
+
+/** Serialized run payload stored in a checkpoint. */
+export interface RunCheckpointState {
+  /** Run snapshot at checkpoint time. */
+  run: Run;
+  /** Turn index reached when the checkpoint was created. */
+  turnIndex: number;
+}

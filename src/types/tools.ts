@@ -51,6 +51,8 @@ export interface ToolContract<
   permissions?: string[];
   /** Cost estimate behavior */
   costEstimate?: (input: TInput) => CostEstimate;
+  /** Source metadata preserved across imports/bridges. */
+  metadata?: Record<string, unknown>;
 }
 
 // ── Tool Execute Params ──
