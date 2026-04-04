@@ -11,8 +11,29 @@ import type {
   ContextSection,
   ContextSectionInput,
   ContextCompilerOptions,
+  ContextRetrievalPolicy,
   TruncationStrategy,
 } from '../types/context';
+
+/** Default retrieval policy encoding the governed-state-first ordering. */
+export const DEFAULT_RETRIEVAL_POLICY: ContextRetrievalPolicy = {
+  sourceOrder: [
+    'system',
+    'instructions',
+    'policy_overlay',
+    'trust_constraints',
+    'payment_constraints',
+    'run_state',
+    'budget',
+    'workspace_state',
+    'derived_memory',
+    'memory',
+    'evidence',
+    'tools',
+    'context',
+    'custom',
+  ],
+};
 
 export class ContextCompiler {
   /**
@@ -73,6 +94,77 @@ export class ContextCompiler {
   estimateTokens(text: string): number {
     if (!text) return 0;
     return Math.ceil(text.length / 4);
+  }
+
+  /**
+   * Compile context sections using a retrieval policy.
+   *
+   * Sections are first grouped by their source's position in the
+   * policy's `sourceOrder`, then by individual priority within each
+   * group. Per-source defaults from `sourceConfig` fill in missing
+   * priority, budget, and truncation values.
+   */
+  compileWithPolicy(
+    options: ContextCompilerOptions,
+    policy: ContextRetrievalPolicy = DEFAULT_RETRIEVAL_POLICY,
+  ): ContextPlan {
+    const { maxTokens, sections: inputs } = options;
+    const orderIndex = new Map(policy.sourceOrder.map((s, i) => [s, i]));
+    const fallbackIndex = policy.sourceOrder.length;
+
+    const enriched = inputs.map((input) => {
+      const cfg = policy.sourceConfig?.[input.source];
+      return {
+        ...input,
+        priority: input.priority ?? cfg?.defaultPriority ?? 50,
+        budgetTokens: input.budgetTokens ?? cfg?.defaultBudgetTokens,
+        truncation: input.truncation ?? cfg?.defaultTruncation ?? ('tail' as const),
+      };
+    });
+
+    // Sort: source-group position first (ascending), then priority within group (descending).
+    enriched.sort((a, b) => {
+      const groupA = orderIndex.get(a.source) ?? fallbackIndex;
+      const groupB = orderIndex.get(b.source) ?? fallbackIndex;
+      if (groupA !== groupB) return groupA - groupB;
+      return b.priority - a.priority;
+    });
+
+    let remainingTokens = maxTokens;
+    const compiledSections: ContextSection[] = [];
+
+    for (const input of enriched) {
+      const estimatedTokens = this.estimateTokens(input.content);
+      const sectionBudget = input.budgetTokens
+        ? Math.min(input.budgetTokens, remainingTokens)
+        : remainingTokens;
+
+      if (sectionBudget <= 0) {
+        compiledSections.push(this.createSection(input, '', 0, true));
+        continue;
+      }
+
+      if (estimatedTokens <= sectionBudget) {
+        compiledSections.push(this.createSection(input, input.content, estimatedTokens, false));
+        remainingTokens -= estimatedTokens;
+      } else {
+        const strategy = input.truncation ?? 'tail';
+        const truncated = this.truncate(input.content, sectionBudget, strategy);
+        const truncatedTokens = this.estimateTokens(truncated);
+        compiledSections.push(this.createSection(input, truncated, truncatedTokens, true));
+        remainingTokens -= truncatedTokens;
+      }
+    }
+
+    const totalTokens = compiledSections.reduce((sum, s) => sum + s.actualTokens, 0);
+
+    return {
+      sections: compiledSections,
+      totalTokens,
+      budgetTokens: maxTokens,
+      hadTruncation: compiledSections.some((s) => s.wasTruncated),
+      compiledAt: Date.now(),
+    };
   }
 
   /** Truncate content to fit within a token budget using the given strategy. */

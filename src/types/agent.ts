@@ -14,6 +14,17 @@ import type { ToolAttachment } from './tools';
 import type { MemoryConfig } from './memory';
 import type { RuntimeHook } from './hooks';
 import type { ModelConfig } from './models';
+import type { ExecutableCapability } from './execution';
+import type { TranscriptStore } from './transcript';
+import type { WorkspaceStateProvider } from '../integrations/WorkspaceStateAdapter';
+import type { ContextRetrievalPolicy } from './context';
+import type { TransportAvailability } from './bootstrap';
+import type {
+  ExecutionGraphStore,
+  MemoryProposalValidator,
+  RunStore,
+  ThreadStore,
+} from './accountability';
 
 // ── Agent Definition ──
 
@@ -132,6 +143,14 @@ export interface RuntimeOptions {
   checkpointStore?: unknown;
   /** Memory store implementation */
   memoryStore?: unknown;
+  /** Transcript store implementation for replay/debugging */
+  transcriptStore?: TranscriptStore;
+  /** Durable run store implementation */
+  runStore?: RunStore;
+  /** Durable thread store implementation */
+  threadStore?: ThreadStore;
+  /** Durable execution-graph store implementation */
+  executionGraphStore?: ExecutionGraphStore;
   /** External event handler */
   onEvent?: (event: unknown) => void;
   /** Policy rules to register on the engine */
@@ -140,6 +159,18 @@ export interface RuntimeOptions {
   approvalRoutes?: unknown[];
   /** Audit sinks to register */
   auditSinks?: unknown[];
+  /** Additional execution capabilities imported from adapters or remote transports */
+  executionCapabilities?: ExecutableCapability[];
+  /** Availability flags for transport surfaces shown in bootstrap reports */
+  transportAvailability?: Partial<TransportAvailability>;
+  /** Control-plane connectivity status for bootstrap reporting */
+  controlPlaneConnected?: boolean | null;
   /** Live handoff handlers keyed by target agent/runtime identifier */
   handoffHandlers?: Record<string, HandoffHandler>;
+  /** Workspace state provider for governed state reads and mutation proposals */
+  workspaceStateProvider?: WorkspaceStateProvider;
+  /** Context retrieval policy controlling source ordering and per-source defaults */
+  retrievalPolicy?: ContextRetrievalPolicy;
+  /** Validators for governed memory/resource proposals before commit */
+  memoryProposalValidators?: MemoryProposalValidator[];
 }

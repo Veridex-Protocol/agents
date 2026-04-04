@@ -20,6 +20,12 @@ import type {
   RunResult,
   ResumeRunOptions,
   RunCheckpointState,
+  TurnOutcome,
+  TurnStopReason,
+  ApprovalStateSnapshot,
+  ContextPlanSummary,
+  RoutedCapabilityMatch,
+  RunSessionSnapshot,
 } from '../types/runtime';
 import type {
   ActionProposal,
@@ -32,8 +38,29 @@ import type {
 } from '../types/models';
 import type { ToolCall, ToolContract } from '../types/tools';
 import type { TraceEvent } from '../types/events';
-import type { ContextPlan, ContextSectionInput } from '../types/context';
+import type { ContextPlan, ContextSectionInput, ContextRetrievalPolicy } from '../types/context';
 import type { MemoryEntry, MemoryWriteRequest } from '../types/memory';
+import type { ExecutableCapability } from '../types/execution';
+import type { TranscriptEntry } from '../types/transcript';
+import type { RuntimeBootstrapReport } from '../types/bootstrap';
+import type {
+  ActorRef,
+  ExecutionGraph,
+  ExecutionGraphStore,
+  ExecutionNode,
+  ExecutionNodeKind,
+  IdempotencyKey,
+  MemoryProposal,
+  MemoryProposalValidationResult,
+  MemoryProposalValidator,
+  ResourceRef,
+  RunStore,
+  SideEffectReceipt,
+  StoredRunRecord,
+  ThreadRecord,
+  ThreadStore,
+  ToolExecutionOutcome,
+} from '../types/accountability';
 
 import { EventBus } from '../events/EventBus';
 import { EventLog } from '../events/EventLog';
@@ -45,24 +72,40 @@ import type { ToolExecutionResult } from '../tools/ToolExecutor';
 import { HookRegistry } from '../hooks/HookRegistry';
 import { HookRunner } from '../hooks/HookRunner';
 import { ContextCompiler } from '../context/ContextCompiler';
+import { DEFAULT_RETRIEVAL_POLICY } from '../context/ContextCompiler';
 import { MemoryManager } from '../memory/MemoryManager';
 import { CheckpointManager } from '../checkpoints/CheckpointManager';
+import { InMemoryTranscriptStore } from '../transcript';
+import {
+  InMemoryExecutionGraphStore,
+  InMemoryRunStore,
+  InMemoryThreadStore,
+} from '../accountability';
 import { CoreAdapter } from '../integrations/CoreAdapter';
 import { PaymentsAdapter } from '../integrations/PaymentsAdapter';
+import { WorkspaceStateAdapter } from '../integrations/WorkspaceStateAdapter';
+import type { WorkspaceStateProvider } from '../integrations/WorkspaceStateAdapter';
 import { PolicyEngine } from '../policy';
 import { ApprovalManager } from '../approvals';
 import { AuditEmitter } from '../audit';
+import { ExecutionSurfaceRegistry } from '../execution';
+import { buildRuntimeBootstrapReport } from './bootstrap';
 import type { CheckpointStore } from '../checkpoints/CheckpointManager';
 import type { MemoryStore } from '../types/memory';
-import type { PolicyRule } from '../policy';
-import type { ApprovalRoute } from '../approvals';
-import type { AuditSink } from '../audit';
+import type { PolicyRule, PolicyDecision } from '../policy';
+import type { ApprovalRoute, ApprovalDecision } from '../approvals';
+import type { AuditSink, ToolExecutionSummary } from '../audit';
 import type { HookPhase } from '../types/hooks';
 import type { HookRunResult } from '../hooks/HookRunner';
+import type { TranscriptStore } from '../types/transcript';
 
 /** Generate a unique event ID. */
 function eventId(): string {
   return `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function cloneRun(run: Run): Run {
+  return JSON.parse(JSON.stringify(run)) as Run;
 }
 
 const DEFAULT_CONTEXT_TOKEN_BUDGET = 4000;
@@ -78,10 +121,13 @@ type ProposalControlResult = {
   waitingForApproval?: boolean;
   requestId?: string;
   reasons?: string[];
-  approvalMode?: string;
+  approvalMode?: ApprovalStateSnapshot['mode'];
   estimatedSpendUSD?: number;
   output?: string;
   metadata?: Record<string, unknown>;
+  policyDecision?: PolicyDecision;
+  approvalDecision?: ApprovalDecision;
+  toolExecutionSummaries?: ToolExecutionSummary[];
 };
 
 export class AgentRuntime {
@@ -99,10 +145,16 @@ export class AgentRuntime {
   readonly context: ContextCompiler;
   readonly memory: MemoryManager;
   readonly checkpoints: CheckpointManager;
+  readonly transcripts: TranscriptStore;
+  readonly executionSurface: ExecutionSurfaceRegistry;
+  readonly runStore: RunStore;
+  readonly threadStore: ThreadStore;
+  readonly executionGraphs: ExecutionGraphStore;
 
   // Integrations
   readonly core: CoreAdapter | null;
   readonly payments: PaymentsAdapter | null;
+  readonly workspaceState: WorkspaceStateAdapter | null;
 
   // Governance
   readonly policyEngine: PolicyEngine;
@@ -113,9 +165,14 @@ export class AgentRuntime {
   private enableTracing: boolean;
   private enableCheckpoints: boolean;
   private onEvent?: (event: unknown) => void;
+  private bootstrapReport: RuntimeBootstrapReport;
   private latestContextPlans = new Map<string, ContextPlan>();
+  private latestSessionSnapshots = new Map<string, RunSessionSnapshot>();
+  private latestExecutionNodeIds = new Map<string, string>();
   private traceHookActive = false;
   private handoffHandlers = new Map<string, HandoffHandler>();
+  private retrievalPolicy: ContextRetrievalPolicy;
+  private memoryProposalValidators: MemoryProposalValidator[];
 
   // Run counter
   private runCounter = 0;
@@ -140,6 +197,12 @@ export class AgentRuntime {
     this.checkpoints = new CheckpointManager(
       options?.checkpointStore as CheckpointStore | undefined,
     );
+    this.transcripts = options?.transcriptStore ?? new InMemoryTranscriptStore();
+    this.executionSurface = new ExecutionSurfaceRegistry();
+    this.runStore = options?.runStore ?? new InMemoryRunStore();
+    this.threadStore = options?.threadStore ?? new InMemoryThreadStore();
+    this.executionGraphs = options?.executionGraphStore ?? new InMemoryExecutionGraphStore();
+    this.memoryProposalValidators = [...(options?.memoryProposalValidators ?? [])];
 
     // Register model providers
     if (options?.modelProviders) {
@@ -154,6 +217,13 @@ export class AgentRuntime {
     if (definition.tools) {
       for (const tool of definition.tools) {
         this.tools.register(tool);
+        this.executionSurface.registerTool(tool);
+      }
+    }
+
+    if (options?.executionCapabilities) {
+      for (const capability of options.executionCapabilities as ExecutableCapability[]) {
+        this.executionSurface.register(capability);
       }
     }
 
@@ -181,6 +251,10 @@ export class AgentRuntime {
             : undefined,
         })
       : null;
+    this.workspaceState = options?.workspaceStateProvider
+      ? new WorkspaceStateAdapter(options.workspaceStateProvider)
+      : null;
+    this.retrievalPolicy = options?.retrievalPolicy ?? DEFAULT_RETRIEVAL_POLICY;
 
     // Config
     this.enableTracing = options?.enableTracing !== false;
@@ -226,6 +300,25 @@ export class AgentRuntime {
     if (this.enableTracing) {
       this.events.onAny((event) => this.eventLog.append(event));
     }
+
+    this.bootstrapReport = buildRuntimeBootstrapReport({
+      agentId: this.definition.id,
+      modelProviders: this.models.list(),
+      defaultModelProvider: this.definition.model.provider,
+      capabilitySummary: this.executionSurface.summary(),
+      activePolicyCount: this.policyEngine.list().length,
+      approvalManagerEnabled: true,
+      checkpointManagerEnabled: this.enableCheckpoints,
+      transcriptStoreMode: this.transcripts.mode,
+      transportAvailability: options?.transportAvailability,
+      identityWired: this.core?.isAvailable() ?? false,
+      paymentsWired: this.payments?.isAvailable() ?? false,
+      controlPlaneConnected: options?.controlPlaneConnected ?? null,
+      maxTurns: this.definition.maxTurns ?? 25,
+      maxTokenBudget: this.definition.maxTokens,
+      contextTokenBudget: DEFAULT_CONTEXT_TOKEN_BUDGET,
+      historyTurns: DEFAULT_HISTORY_TURNS,
+    });
   }
 
   /** Get the most recently compiled context plan for a run. */
@@ -239,6 +332,39 @@ export class AgentRuntime {
     return this.latestContextPlans.get(latestRunId) ?? null;
   }
 
+  /** Get the runtime bootstrap/setup report. */
+  getBootstrapReport(): RuntimeBootstrapReport {
+    return {
+      ...this.bootstrapReport,
+      modelProviders: [...this.bootstrapReport.modelProviders],
+      capabilitySources: this.bootstrapReport.capabilitySources.map((entry) => ({ ...entry })),
+      transportAvailability: { ...this.bootstrapReport.transportAvailability },
+      veridex: { ...this.bootstrapReport.veridex },
+      defaults: { ...this.bootstrapReport.defaults },
+    };
+  }
+
+  /** Get the most recently captured session snapshot for a run. */
+  getLatestSessionSnapshot(runId?: string): RunSessionSnapshot | null {
+    if (runId) {
+      return this.latestSessionSnapshots.get(runId) ?? null;
+    }
+
+    const latestRunId = [...this.latestSessionSnapshots.keys()].at(-1);
+    if (!latestRunId) return null;
+    return this.latestSessionSnapshots.get(latestRunId) ?? null;
+  }
+
+  /** Load the durable run record for a run if one exists. */
+  async getStoredRunRecord(runId: string): Promise<StoredRunRecord | null> {
+    return this.runStore.read(runId);
+  }
+
+  /** Load the durable thread record for a run if one exists. */
+  async getStoredThread(runId: string): Promise<ThreadRecord | null> {
+    return this.threadStore.read(this.getThreadId(runId));
+  }
+
   /** List checkpoints for a run. */
   async listCheckpoints(runId: string) {
     return this.checkpoints.list(runId);
@@ -247,6 +373,207 @@ export class AgentRuntime {
   /** Load a stored checkpoint. */
   async loadCheckpoint(checkpointId: string) {
     return this.checkpoints.load(checkpointId);
+  }
+
+  private getThreadId(runId: string): string {
+    return `thread_${runId}`;
+  }
+
+  private async persistRunState(run: Run, session?: RunSessionSnapshot): Promise<void> {
+    const transcript = await this.transcripts.getRef(run.id);
+    await this.runStore.write({
+      run: cloneRun(run),
+      latestContextSummary: this.buildContextPlanSummary(this.latestContextPlans.get(run.id)),
+      sessionSnapshot: session
+        ? {
+            updatedAt: session.updatedAt,
+            transcript: session.transcript,
+            executionGraph: session.executionGraph,
+          }
+        : undefined,
+      transcript,
+      bootstrapReport: this.getBootstrapReport(),
+      updatedAt: Date.now(),
+    });
+  }
+
+  private async persistThreadState(run: Run, session?: RunSessionSnapshot): Promise<void> {
+    const transcript = session?.transcript ?? await this.transcripts.getRef(run.id);
+    await this.threadStore.write({
+      id: this.getThreadId(run.id),
+      runId: run.id,
+      agentId: run.agentId,
+      title: run.input.slice(0, 120),
+      state: run.state,
+      transcript,
+      executionGraph: session?.executionGraph ?? await this.executionGraphs.getRef(run.id),
+      metadata: run.metadata ? { ...run.metadata } : undefined,
+      createdAt: run.createdAt,
+      updatedAt: Date.now(),
+    });
+  }
+
+  private buildActorRef(type: ActorRef['type'], id: string, label?: string): ActorRef {
+    return { type, id, label };
+  }
+
+  private async appendExecutionNode(
+    runId: string,
+    input: Omit<ExecutionNode, 'id' | 'runId' | 'timestamp'>,
+    relation: 'follows' | 'triggered' | 'validated_by' | 'approved_by' | 'invoked' | 'mutates' | 'recorded_as' = 'follows',
+  ): Promise<ExecutionNode> {
+    const node: ExecutionNode = {
+      ...input,
+      id: `xnode_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      runId,
+      timestamp: Date.now(),
+      metadata: input.metadata ? { ...input.metadata } : undefined,
+    };
+    await this.executionGraphs.appendNode(node);
+    const previousNodeId = this.latestExecutionNodeIds.get(runId);
+    if (previousNodeId) {
+      await this.executionGraphs.appendEdge({
+        id: `xedge_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        runId,
+        from: previousNodeId,
+        to: node.id,
+        relation,
+        timestamp: Date.now(),
+      });
+    }
+    this.latestExecutionNodeIds.set(runId, node.id);
+    return node;
+  }
+
+  private async recordSideEffectReceipt(receipt: SideEffectReceipt): Promise<SideEffectReceipt> {
+    await this.executionGraphs.recordReceipt(receipt);
+    await this.appendExecutionNode(receipt.runId, {
+      turnIndex: receipt.turnIndex,
+      kind: 'side_effect_receipt',
+      phase: 'receipt',
+      actor: this.buildActorRef('system', this.definition.id, this.definition.name),
+      capabilityName: receipt.capabilityName,
+      resource: receipt.resource,
+      status: receipt.status === 'failed' ? 'failure' : receipt.status === 'skipped' ? 'skipped' : 'success',
+      summary: receipt.summary,
+      metadata: {
+        receiptId: receipt.id,
+        idempotencyKey: receipt.idempotencyKey,
+      },
+    }, 'recorded_as');
+    this.emitEvent({
+      id: eventId(),
+      type: 'side_effect_receipt_recorded',
+      runId: receipt.runId,
+      agentId: this.definition.id,
+      turnIndex: receipt.turnIndex,
+      timestamp: Date.now(),
+      data: {
+        capabilityName: receipt.capabilityName,
+        receiptId: receipt.id,
+        idempotencyKey: receipt.idempotencyKey,
+        status: receipt.status,
+      },
+    });
+    return receipt;
+  }
+
+  private classifyToolExecutionOutcome(
+    execution: ToolExecutionResult,
+    blockedState?: 'approval_blocked' | 'policy_blocked',
+  ): ToolExecutionOutcome {
+    if (blockedState) return blockedState;
+    if (execution.outcome) return execution.outcome;
+    if (execution.result.success === false) {
+      return execution.retryCount > 0 ? 'transient_failure' : 'permanent_failure';
+    }
+    return 'success';
+  }
+
+  private buildIdempotencyKey(
+    runId: string,
+    turnIndex: number,
+    toolCall: ToolCall,
+  ): IdempotencyKey {
+    return `${runId}:${turnIndex}:${toolCall.id}:${toolCall.name}`;
+  }
+
+  private async validateMemoryProposal(
+    request: MemoryWriteRequest,
+  ): Promise<MemoryProposalValidationResult> {
+    const proposal: MemoryProposal = {
+      kind: request.entry.kind ?? 'note',
+      request,
+      evidence: request.entry.evidenceRef ? [request.entry.evidenceRef] : undefined,
+    };
+    const existingEntries = await this.memory.search({
+      kind: request.entry.kind,
+      text: request.entry.content,
+      limit: 25,
+    });
+    const issues: MemoryProposalValidationResult['issues'] = [];
+
+    if (existingEntries.some((entry) => entry.content === request.entry.content)) {
+      issues.push({
+        code: 'dedup',
+        severity: request.overwriteStrategy === 'skip' ? 'warn' : 'info',
+        message: 'An equivalent memory entry already exists.',
+      });
+    }
+    if (/sk-[a-z0-9]{8,}|BEGIN [A-Z ]+PRIVATE KEY|password\s*=|api[_-]?key/i.test(request.entry.content)) {
+      issues.push({
+        code: 'secrecy',
+        severity: 'error',
+        message: 'Memory proposal looks like it may contain a secret or credential.',
+      });
+    }
+    if ((request.entry.confidence ?? 1) < 0.5) {
+      issues.push({
+        code: 'confidence',
+        severity: 'warn',
+        message: 'Memory proposal has low confidence and may require review.',
+      });
+    }
+    if (request.entry.kind === 'workspace_state' && request.entry.stateRef?.resourceType && request.entry.stateRef?.resourceId) {
+      const conflicting = await this.memory.search({
+        kind: 'workspace_state',
+        resourceType: request.entry.stateRef.resourceType,
+        resourceId: request.entry.stateRef.resourceId,
+        limit: 10,
+      });
+      if (conflicting.some((entry) => entry.content !== request.entry.content)) {
+        issues.push({
+          code: 'conflict',
+          severity: 'warn',
+          message: 'Existing workspace-state entries disagree with this proposal.',
+        });
+      }
+      if (!request.entry.stateRef.version) {
+        issues.push({
+          code: 'staleness',
+          severity: 'warn',
+          message: 'Workspace-state proposal does not declare an expected version.',
+        });
+      }
+    }
+
+    let accepted = issues.every((issue) => issue.severity !== 'error');
+    let normalizedProposal = proposal;
+
+    for (const validator of this.memoryProposalValidators) {
+      const result = await validator.validate(normalizedProposal, { existingEntries });
+      issues.push(...result.issues);
+      accepted = accepted && result.accepted;
+      if (result.normalizedProposal) {
+        normalizedProposal = result.normalizedProposal;
+      }
+    }
+
+    return {
+      accepted,
+      issues,
+      normalizedProposal,
+    };
   }
 
   /** Resume a suspended run from a previously saved checkpoint. */
@@ -267,27 +594,59 @@ export class AgentRuntime {
     const run: Run = {
       ...parsed.run,
       turns: [...parsed.run.turns],
+      turnOutcomes: [...(parsed.run.turnOutcomes ?? [])],
+      policyDecisions: [...(parsed.run.policyDecisions ?? [])],
+      approvalDecisions: [...(parsed.run.approvalDecisions ?? [])],
       updatedAt: Date.now(),
     };
+    await this.transcripts.replace(run.id, parsed.transcriptEntries ?? []);
     const startTurnIndex = (parsed.turnIndex ?? run.turns.length - 1) + 1;
 
     const approval = options?.approval;
     if (run.state === 'waiting_for_approval') {
       const lastTurn = run.turns[run.turns.length - 1];
       if (!approval) {
-        return this.buildRunResult(run);
+        return await this.buildRunResult(run);
       }
 
-      if (!approval.approved) {
-        if (approval.requestId) {
-          this.approvals.resolve(
+        if (!approval.approved) {
+          if (approval.requestId) {
+            const decision = this.approvals.resolve(
             approval.requestId,
             false,
             approval.approver ?? 'operator',
             approval.reason,
           );
-        }
-        await this.runHooks('afterApprovalDecision', {
+          if (decision) {
+            run.approvalDecisions.push(decision);
+            await this.appendTranscriptEntry({
+              runId: run.id,
+              agentId: this.definition.id,
+              turnIndex: lastTurn?.index ?? parsed.turnIndex ?? 0,
+              kind: 'approval_event',
+              content: `Approval denied by ${decision.decidedBy}: ${decision.reason ?? 'No reason provided'}`,
+              metadata: {
+                requestId: decision.requestId,
+                approved: false,
+              },
+            });
+          }
+          }
+          this.emitEvent({
+            id: eventId(),
+            type: 'approval_resolved',
+            runId: run.id,
+            agentId: this.definition.id,
+            turnIndex: lastTurn?.index ?? parsed.turnIndex ?? 0,
+            timestamp: Date.now(),
+            data: {
+              requestId: approval.requestId,
+              approved: false,
+              approver: approval.approver ?? 'operator',
+              reason: approval.reason,
+            },
+          });
+          await this.runHooks('afterApprovalDecision', {
           runId: run.id,
           agentId: this.definition.id,
           turnIndex: lastTurn?.index ?? parsed.turnIndex ?? 0,
@@ -298,7 +657,7 @@ export class AgentRuntime {
         }, { runId: run.id, turnIndex: lastTurn?.index });
         run.state = 'failed';
         run.error = approval.reason ?? 'Approval denied';
-        return this.finalizeRun(run);
+        return await this.finalizeRun(run);
       }
 
       if (
@@ -320,13 +679,41 @@ export class AgentRuntime {
       }
 
       if (approval.requestId) {
-        this.approvals.resolve(
+        const decision = this.approvals.resolve(
           approval.requestId,
           true,
           approval.approver ?? 'operator',
           approval.reason,
         );
+        if (decision) {
+          run.approvalDecisions.push(decision);
+          await this.appendTranscriptEntry({
+            runId: run.id,
+            agentId: this.definition.id,
+            turnIndex: lastTurn?.index ?? parsed.turnIndex ?? 0,
+            kind: 'approval_event',
+            content: `Approval granted by ${decision.decidedBy}: ${decision.reason ?? 'Approved'}`,
+            metadata: {
+              requestId: decision.requestId,
+              approved: true,
+            },
+          });
+        }
       }
+      this.emitEvent({
+        id: eventId(),
+        type: 'approval_resolved',
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex: lastTurn?.index ?? parsed.turnIndex ?? 0,
+        timestamp: Date.now(),
+        data: {
+          requestId: approval.requestId,
+          approved: true,
+          approver: approval.approver ?? 'operator',
+          reason: approval.reason,
+        },
+      });
       if (!lastTurn || lastTurn.proposal.type !== 'tool_call') {
         await this.runHooks('afterApprovalDecision', {
           runId: run.id,
@@ -354,11 +741,34 @@ export class AgentRuntime {
       state: 'queued',
       input,
       turns: [],
+      turnOutcomes: [],
       createdAt: Date.now(),
       updatedAt: Date.now(),
       totalUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      policyDecisions: [],
+      approvalDecisions: [],
       metadata,
     };
+
+    await this.persistRunState(run);
+    await this.persistThreadState(run);
+    await this.appendExecutionNode(run.id, {
+      kind: 'actor',
+      phase: 'proposal',
+      actor: this.buildActorRef('agent', this.definition.id, this.definition.name),
+      status: 'success',
+      summary: `Run started for agent ${this.definition.name}`,
+      metadata: { input },
+    });
+
+    this.emitEvent({
+      id: eventId(),
+      type: 'bootstrap_report_generated',
+      runId,
+      agentId: this.definition.id,
+      timestamp: Date.now(),
+      data: { report: this.getBootstrapReport() },
+    });
 
     this.emitEvent({
       id: eventId(),
@@ -367,6 +777,23 @@ export class AgentRuntime {
       agentId: this.definition.id,
       timestamp: Date.now(),
       data: { input },
+    });
+
+    await this.appendTranscriptEntry({
+      runId,
+      agentId: this.definition.id,
+      kind: 'system_note',
+      content: `Runtime bootstrap ready with ${this.bootstrapReport.capabilityCount} capabilities and ${this.bootstrapReport.modelProviders.length} model providers.`,
+      metadata: {
+        type: 'bootstrap_report',
+      },
+    });
+    await this.appendTranscriptEntry({
+      runId,
+      agentId: this.definition.id,
+      kind: 'user_input',
+      content: input,
+      metadata,
     });
 
     // beforeRun hook
@@ -406,25 +833,38 @@ export class AgentRuntime {
       }
 
       try {
-        const turn = await this.executeTurn(run, turnIndex);
+        const { turn, outcome } = await this.executeTurn(run, turnIndex);
         run.turns.push(turn);
+        run.turnOutcomes.push(outcome);
 
         // Accumulate usage
         run.totalUsage.inputTokens += turn.usage.inputTokens;
         run.totalUsage.outputTokens += turn.usage.outputTokens;
         run.totalUsage.totalTokens += turn.usage.totalTokens;
         run.updatedAt = Date.now();
+        await this.persistRunState(run);
+        await this.persistThreadState(run);
 
         // Check token budget
         if (this.definition.maxTokens && run.totalUsage.totalTokens > this.definition.maxTokens) {
           run.state = 'failed';
           run.error = `Token budget exceeded (${run.totalUsage.totalTokens}/${this.definition.maxTokens})`;
+          run.turnOutcomes[run.turnOutcomes.length - 1] = {
+            ...outcome,
+            stopReason: 'max_budget_reached',
+            runState: 'failed',
+          };
           break;
         }
 
         // Determine next state based on proposal
         const nextState = this.getNextState(turn.proposal, turn.result);
         run.state = nextState;
+        run.turnOutcomes[run.turnOutcomes.length - 1] = {
+          ...outcome,
+          runState: nextState,
+          stopReason: this.getTurnStopReason(nextState, turn.proposal, turn.result, outcome.toolExecutionSummaries),
+        };
 
         if (nextState === 'completed') {
           const control = turn.result as ProposalControlResult | undefined;
@@ -445,7 +885,9 @@ export class AgentRuntime {
           // Checkpoint if enabled
           if (this.enableCheckpoints) {
             const checkpoint = await this.checkpoints.save(run.id, this.definition.id, turnIndex, {
-              run, turnIndex,
+              run,
+              turnIndex,
+              transcriptEntries: await this.transcripts.list(run.id),
             }, nextState === 'waiting_for_approval' ? 'approval' : 'suspend');
             this.emitEvent({
               id: eventId(),
@@ -491,6 +933,14 @@ export class AgentRuntime {
       run.state = 'completed';
       const lastTurn = run.turns[run.turns.length - 1];
       run.output = lastTurn?.modelOutput ?? 'Max turns reached without a final answer.';
+      if (run.turnOutcomes.length > 0) {
+        const lastOutcome = run.turnOutcomes[run.turnOutcomes.length - 1];
+        run.turnOutcomes[run.turnOutcomes.length - 1] = {
+          ...lastOutcome,
+          stopReason: 'max_turns_reached',
+          runState: 'completed',
+        };
+      }
     }
 
     // afterRun hook
@@ -503,15 +953,19 @@ export class AgentRuntime {
       }, { runId: run.id });
     }
 
-    return this.finalizeRun(run);
+    return await this.finalizeRun(run);
   }
 
   /** Execute a single turn. */
-  private async executeTurn(run: Run, turnIndex: number): Promise<Turn> {
+  private async executeTurn(
+    run: Run,
+    turnIndex: number,
+  ): Promise<{ turn: Turn; outcome: TurnOutcome }> {
     const provider = this.models.get(this.definition.model.provider);
     if (!provider) {
       throw new Error(`Model provider '${this.definition.model.provider}' not registered`);
     }
+    const turnEventPosition = this.eventLog.size;
 
     // Build messages
     const { messages, contextPlan } = await this.buildMessages(run, turnIndex);
@@ -573,6 +1027,19 @@ export class AgentRuntime {
       },
     });
 
+    await this.appendTranscriptEntry({
+      runId: run.id,
+      agentId: this.definition.id,
+      turnIndex,
+      kind: 'model_output',
+      content: response.content,
+      metadata: {
+        provider: response.provider,
+        model: response.model,
+        finishReason: response.finishReason,
+      },
+    });
+
     // afterModelCall hook
     await this.runHooks('afterModelCall', {
       runId: run.id, agentId: this.definition.id, turnIndex, response,
@@ -580,6 +1047,49 @@ export class AgentRuntime {
 
     // Parse proposal from response
     const proposal = this.parseProposal(response);
+    await this.appendExecutionNode(run.id, {
+      turnIndex,
+      kind: 'proposal',
+      phase: 'proposal',
+      actor: this.buildActorRef('model', response.model, response.provider),
+      proposalType: proposal.type,
+      status: 'success',
+      summary: `Proposal created: ${proposal.type}`,
+      metadata: this.buildProposalMetadata(proposal),
+    }, 'triggered');
+    this.emitEvent({
+      id: eventId(),
+      type: 'proposal_created',
+      runId: run.id,
+      agentId: this.definition.id,
+      turnIndex,
+      timestamp: Date.now(),
+      data: {
+        proposalType: proposal.type,
+        summary: this.buildProposalSummary(proposal),
+      },
+    });
+    await this.appendExecutionNode(run.id, {
+      turnIndex,
+      kind: 'proposal',
+      phase: 'validation',
+      actor: this.buildActorRef('system', 'runtime-validator', 'Runtime Validator'),
+      proposalType: proposal.type,
+      status: 'success',
+      summary: `Proposal validated: ${proposal.type}`,
+    }, 'validated_by');
+    this.emitEvent({
+      id: eventId(),
+      type: 'proposal_validated',
+      runId: run.id,
+      agentId: this.definition.id,
+      turnIndex,
+      timestamp: Date.now(),
+      data: {
+        proposalType: proposal.type,
+        accepted: true,
+      },
+    });
 
     // Execute proposal
     const result = await this.executeProposal(run, turnIndex, proposal);
@@ -589,14 +1099,17 @@ export class AgentRuntime {
       input: messages.map((m) => m.content).join('\n'),
       modelOutput: response.content,
       proposal,
-      approved: true,
+      approved: !this.isBlockedResult(result),
       result,
       usage: response.usage,
       timestamp: Date.now(),
-      events: [],
+      events: this.eventLog.since(turnEventPosition).filter((event) => event.runId === run.id),
     };
 
-    return turn;
+    return {
+      turn,
+      outcome: this.buildTurnOutcome(turn, result),
+    };
   }
 
   /** Build message history for model call. */
@@ -663,17 +1176,19 @@ export class AgentRuntime {
 
   /** Build tool definitions for the model. */
   private buildToolDefinitions(): ModelToolDefinition[] {
-    const tools = this.tools.getAll();
-    return tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      parameters: this.extractJsonSchema(tool),
-    }));
+    return this.executionSurface.getAll()
+      .filter((capability) => capability.inputSchema)
+      .map((capability) => ({
+        name: capability.name,
+        description: capability.description,
+        parameters: this.extractJsonSchema(capability.inputSchema ?? { type: 'object', properties: {} }),
+      }));
   }
 
   /** Extract JSON Schema from a tool's input definition. */
-  private extractJsonSchema(tool: ToolContract): Record<string, unknown> {
-    const input = tool.input;
+  private extractJsonSchema(
+    input: ToolContract['input'] | Record<string, unknown>,
+  ): Record<string, unknown> {
     // Check if it's a Zod schema (has ._def or .parse method)
     if (input && typeof input === 'object' && '_def' in input) {
       // Cast via unknown to break deep Zod generic type chain (TS2589 in DTS generation)
@@ -787,7 +1302,7 @@ export class AgentRuntime {
     switch (proposal.type) {
       case 'tool_call': {
         for (const toolCall of proposal.toolCalls) {
-          const tool = this.tools.get(toolCall.name);
+          const capability = this.executionSurface.get(toolCall.name);
           this.emitEvent({
             id: eventId(),
             type: 'tool_proposed',
@@ -798,7 +1313,18 @@ export class AgentRuntime {
             data: {
               toolName: toolCall.name,
               arguments: toolCall.arguments,
-              safetyClass: tool?.safetyClass ?? 'unknown',
+              safetyClass: capability?.safetyClass ?? 'unknown',
+            },
+          });
+          await this.appendTranscriptEntry({
+            runId: run.id,
+            agentId: this.definition.id,
+            turnIndex,
+            kind: 'tool_call',
+            content: `${toolCall.name}(${JSON.stringify(toolCall.arguments)})`,
+            metadata: {
+              source: capability?.source,
+              safetyClass: capability?.safetyClass,
             },
           });
         }
@@ -825,6 +1351,32 @@ export class AgentRuntime {
             timestamp: Date.now(),
             data: { verdict: decision.verdict, riskScore: decision.riskScore, reasons: decision.reasons },
           } as TraceEvent);
+          await this.appendExecutionNode(run.id, {
+            turnIndex,
+            kind: 'policy_decision',
+            phase: 'policy',
+            actor: this.buildActorRef('system', 'policy-engine', 'Policy Engine'),
+            status: decision.verdict === 'block' ? 'blocked' : 'success',
+            summary: `Policy ${decision.verdict} (${decision.riskScore.toFixed(2)})`,
+            metadata: {
+              verdict: decision.verdict,
+              riskScore: decision.riskScore,
+              reasons: decision.reasons,
+            },
+          }, 'validated_by');
+          run.policyDecisions.push(decision);
+          await this.appendTranscriptEntry({
+            runId: run.id,
+            agentId: this.definition.id,
+            turnIndex,
+            kind: 'policy_decision',
+            content: `${decision.verdict.toUpperCase()} (${decision.riskScore.toFixed(2)}): ${decision.reasons.join('; ') || 'No reasons provided'}`,
+            metadata: {
+              verdict: decision.verdict,
+              riskScore: decision.riskScore,
+              reasons: decision.reasons,
+            },
+          });
 
           if (decision.verdict === 'block') {
             await this.runHooks('onPolicyViolation', {
@@ -838,6 +1390,7 @@ export class AgentRuntime {
               blocked: true,
               terminalState: 'failed',
               reasons: decision.reasons,
+              policyDecision: decision,
             } satisfies ProposalControlResult;
           }
 
@@ -862,6 +1415,7 @@ export class AgentRuntime {
                 blocked: true,
                 terminalState: 'failed',
                 reasons: beforeApproval.reasons,
+                policyDecision: decision,
               } satisfies ProposalControlResult;
             }
 
@@ -888,14 +1442,80 @@ export class AgentRuntime {
                   riskScore: decision.riskScore,
                 },
               });
+              await this.appendExecutionNode(run.id, {
+                turnIndex,
+                kind: 'approval',
+                phase: 'approval',
+                actor: this.buildActorRef('system', 'approval-manager', 'Approval Manager'),
+                status: 'pending',
+                summary: `Approval requested for tool call: ${started.request.reason}`,
+                metadata: {
+                  requestId: started.request.id,
+                  mode: started.request.mode,
+                  riskScore: decision.riskScore,
+                },
+              }, 'approved_by');
+              await this.appendTranscriptEntry({
+                runId: run.id,
+                agentId: this.definition.id,
+                turnIndex,
+                kind: 'approval_event',
+                content: `Approval requested for tool call: ${started.request.reason}`,
+                metadata: {
+                  requestId: started.request.id,
+                  mode: started.request.mode,
+                  riskScore: decision.riskScore,
+                },
+              });
               return {
                 blocked: true,
                 waitingForApproval: true,
                 requestId: started.request.id,
                 approvalMode: started.request.mode,
                 reasons: [started.request.reason],
+                policyDecision: decision,
               } satisfies ProposalControlResult;
             }
+
+            run.approvalDecisions.push(started.decision);
+            this.emitEvent({
+              id: eventId(),
+              type: 'approval_resolved',
+              runId: run.id,
+              agentId: this.definition.id,
+              turnIndex,
+              timestamp: Date.now(),
+              data: {
+                requestId: started.request.id,
+                approved: started.decision.approved,
+                approver: started.decision.decidedBy,
+                reason: started.decision.reason,
+              },
+            });
+            await this.appendExecutionNode(run.id, {
+              turnIndex,
+              kind: 'approval',
+              phase: 'approval',
+              actor: this.buildActorRef('operator', started.decision.decidedBy, started.decision.decidedBy),
+              status: started.decision.approved ? 'success' : 'blocked',
+              summary: `Approval ${started.decision.approved ? 'granted' : 'denied'}`,
+              metadata: {
+                requestId: started.request.id,
+                reason: started.decision.reason,
+              },
+            }, 'approved_by');
+            await this.appendTranscriptEntry({
+              runId: run.id,
+              agentId: this.definition.id,
+              turnIndex,
+              kind: 'approval_event',
+              content: `Approval ${started.decision.approved ? 'granted' : 'denied'} by ${started.decision.decidedBy}: ${started.decision.reason ?? 'No reason provided'}`,
+              metadata: {
+                requestId: started.request.id,
+                mode: started.request.mode,
+                approved: started.decision.approved,
+              },
+            });
 
             await this.runHooks('afterApprovalDecision', {
               runId: run.id,
@@ -912,12 +1532,40 @@ export class AgentRuntime {
                 blocked: true,
                 terminalState: 'failed',
                 reasons: [`Approval denied: ${started.decision.reason ?? 'Unknown reason'}`],
+                approvalDecision: started.decision,
+                policyDecision: decision,
               } satisfies ProposalControlResult;
             }
           }
         }
 
         if (options?.approval?.approved) {
+          this.emitEvent({
+            id: eventId(),
+            type: 'approval_resolved',
+            runId: run.id,
+            agentId: this.definition.id,
+            turnIndex,
+            timestamp: Date.now(),
+            data: {
+              requestId: options.approval.requestId,
+              approved: true,
+              approver: options.approval.approver ?? 'operator',
+              reason: options.approval.reason,
+            },
+          });
+          await this.appendExecutionNode(run.id, {
+            turnIndex,
+            kind: 'approval',
+            phase: 'approval',
+            actor: this.buildActorRef('operator', options.approval.approver ?? 'operator', options.approval.approver ?? 'operator'),
+            status: 'success',
+            summary: 'Approval resolved during resume',
+            metadata: {
+              requestId: options.approval.requestId,
+              reason: options.approval.reason,
+            },
+          }, 'approved_by');
           await this.runHooks('afterApprovalDecision', {
             runId: run.id,
             agentId: this.definition.id,
@@ -931,8 +1579,9 @@ export class AgentRuntime {
 
         if (this.payments?.isAvailable()) {
           for (const toolCall of proposal.toolCalls) {
+            const capability = this.executionSurface.get(toolCall.name);
             const tool = this.tools.get(toolCall.name);
-            const estimate = tool?.costEstimate?.(toolCall.arguments);
+            const estimate = capability?.costEstimate?.(toolCall.arguments) ?? tool?.costEstimate?.(toolCall.arguments);
             if (!estimate) continue;
 
             const beforePayment = await this.runHooks('beforePayment', {
@@ -972,9 +1621,10 @@ export class AgentRuntime {
 
         const results: ToolExecutionResult[] = [];
         for (const toolCall of proposal.toolCalls) {
+          const capability = this.executionSurface.get(toolCall.name);
           const tool = this.tools.get(toolCall.name);
           const toolName = toolCall.name;
-          const safetyClass = tool?.safetyClass ?? 'read';
+          const safetyClass = capability?.safetyClass ?? tool?.safetyClass ?? 'read';
 
           const beforeValidation = await this.runHooks('beforeToolValidation', {
             runId: run.id,
@@ -995,13 +1645,16 @@ export class AgentRuntime {
               },
               durationMs: 0,
               retryCount: 0,
+              outcome: 'policy_blocked',
             });
             continue;
           }
 
-          const validationError = tool
-            ? this.toolValidator.validateInput(tool, toolCall.arguments)
-            : `Tool '${toolName}' not found`;
+          const validationError = capability?.tool
+            ? this.toolValidator.validateInput(capability.tool, toolCall.arguments)
+            : !capability
+              ? `Tool '${toolName}' not found`
+              : undefined;
 
           await this.runHooks('afterToolValidation', {
             runId: run.id,
@@ -1024,6 +1677,7 @@ export class AgentRuntime {
               },
               durationMs: 0,
               retryCount: 0,
+              outcome: 'permanent_failure',
             });
             continue;
           }
@@ -1047,11 +1701,128 @@ export class AgentRuntime {
               },
               durationMs: 0,
               retryCount: 0,
+              outcome: 'policy_blocked',
             });
             continue;
           }
 
-          const execution = await this.toolExecutor.execute(toolCall, context);
+          const idempotencyKey = this.buildIdempotencyKey(run.id, turnIndex, toolCall);
+          const existingReceipt = await this.executionGraphs.findReceiptByIdempotencyKey(run.id, idempotencyKey);
+          this.emitEvent({
+            id: eventId(),
+            type: 'capability_invoked',
+            runId: run.id,
+            agentId: this.definition.id,
+            turnIndex,
+            timestamp: Date.now(),
+            data: {
+              capabilityName: toolName,
+              source: capability?.source,
+              safetyClass,
+              idempotencyKey,
+            },
+          });
+          await this.appendExecutionNode(run.id, {
+            turnIndex,
+            kind: 'capability',
+            phase: 'execution',
+            actor: this.buildActorRef('tool', toolName, toolName),
+            capabilityName: toolName,
+            status: existingReceipt ? 'skipped' : 'pending',
+            summary: existingReceipt
+              ? `Skipped ${toolName}; existing receipt ${existingReceipt.id}`
+              : `Invoking capability ${toolName}`,
+            metadata: {
+              source: capability?.source,
+              safetyClass,
+              idempotencyKey,
+            },
+          }, 'invoked');
+
+          if (existingReceipt) {
+            const execution: ToolExecutionResult = {
+              toolCall,
+              result: {
+                llmOutput: existingReceipt.summary,
+                uiOutput: existingReceipt.summary,
+                success: true,
+              },
+              durationMs: 0,
+              retryCount: 0,
+              outcome: 'idempotent_skip',
+              receipt: existingReceipt,
+            };
+            results.push(execution);
+            await this.recordSideEffectReceipt({
+              ...existingReceipt,
+              status: 'skipped',
+              summary: `Idempotent skip for ${toolName}`,
+              recordedAt: Date.now(),
+            });
+            continue;
+          }
+
+          let execution: ToolExecutionResult;
+          if (capability?.tool) {
+            execution = await this.toolExecutor.execute(toolCall, context);
+          } else if (capability) {
+            const startedAt = Date.now();
+            try {
+              const result = await capability.execute({
+                input: toolCall.arguments,
+                context,
+              });
+              execution = {
+                toolCall,
+                result,
+                durationMs: Date.now() - startedAt,
+                retryCount: 0,
+              };
+            } catch (error) {
+              execution = {
+                toolCall,
+                result: {
+                  llmOutput: '',
+                  success: false,
+                  error: error instanceof Error ? error.message : String(error),
+                },
+                durationMs: Date.now() - startedAt,
+                retryCount: 0,
+              };
+            }
+          } else {
+            execution = {
+              toolCall,
+              result: {
+                llmOutput: '',
+                success: false,
+                error: `Tool '${toolName}' not found`,
+              },
+              durationMs: 0,
+              retryCount: 0,
+            };
+          }
+
+          execution.outcome = this.classifyToolExecutionOutcome(execution);
+          const receipt: SideEffectReceipt = {
+            id: `receipt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            runId: run.id,
+            turnIndex,
+            capabilityName: toolName,
+            idempotencyKey,
+            status: execution.result.success === false ? 'failed' : 'recorded',
+            summary: execution.result.success === false
+              ? `${toolName} failed: ${execution.result.error ?? 'Unknown error'}`
+              : `${toolName} executed successfully`,
+            resource: undefined,
+            metadata: {
+              source: capability?.source,
+              durationMs: execution.durationMs,
+              outcome: execution.outcome,
+            },
+            recordedAt: Date.now(),
+          };
+          execution.receipt = await this.recordSideEffectReceipt(receipt);
 
           await this.runHooks('afterToolExecute', {
             runId: run.id,
@@ -1065,6 +1836,20 @@ export class AgentRuntime {
           }, { runId: run.id, turnIndex });
 
           results.push(execution);
+          await this.appendTranscriptEntry({
+            runId: run.id,
+            agentId: this.definition.id,
+            turnIndex,
+            kind: 'tool_result',
+            content: `${toolName}: ${execution.result.success ? 'success' : 'failure'}${execution.result.error ? ` (${execution.result.error})` : ''}`,
+            metadata: {
+              source: capability?.source,
+              durationMs: execution.durationMs,
+              success: execution.result.success,
+              outcome: execution.outcome,
+              receiptId: execution.receipt?.id,
+            },
+          });
         }
 
         // Emit tool events
@@ -1148,6 +1933,111 @@ export class AgentRuntime {
             continue;
           }
 
+          const validation = await this.validateMemoryProposal(req);
+          await this.appendExecutionNode(run.id, {
+            turnIndex,
+            kind: 'proposal',
+            phase: 'validation',
+            actor: this.buildActorRef('system', 'memory-validator', 'Memory Validator'),
+            proposalType: 'memory_write',
+            status: validation.accepted ? 'success' : 'blocked',
+            summary: validation.accepted ? 'Memory proposal validated' : 'Memory proposal rejected',
+            metadata: {
+              issues: validation.issues,
+            },
+          }, 'validated_by');
+          this.emitEvent({
+            id: eventId(),
+            type: 'proposal_validated',
+            runId: run.id,
+            agentId: this.definition.id,
+            turnIndex,
+            timestamp: Date.now(),
+            data: {
+              proposalType: 'memory_write',
+              accepted: validation.accepted,
+              issues: validation.issues.map((issue) => `${issue.code}: ${issue.message}`),
+            },
+          });
+          if (!validation.accepted) {
+            continue;
+          }
+
+          if (req.entry.kind === 'workspace_state' && req.entry.stateRef && this.workspaceState?.isAvailable()) {
+            const resourceRef = this.stateRefToResourceRef(req.entry.stateRef);
+            this.emitEvent({
+              id: eventId(),
+              type: 'resource_mutation_proposed',
+              runId: run.id,
+              agentId: this.definition.id,
+              turnIndex,
+              timestamp: Date.now(),
+              data: {
+                resourceType: req.entry.stateRef.resourceType,
+                resourceId: req.entry.stateRef.resourceId,
+                operation: 'update',
+              },
+            });
+            await this.appendExecutionNode(run.id, {
+              turnIndex,
+              kind: 'resource_mutation',
+              phase: 'mutation',
+              actor: this.buildActorRef('agent', this.definition.id, this.definition.name),
+              resource: resourceRef,
+              status: 'pending',
+              summary: `Workspace mutation proposed for ${req.entry.stateRef.resourceType}/${req.entry.stateRef.resourceId}`,
+              metadata: {
+                overwriteStrategy: req.overwriteStrategy,
+              },
+            }, 'mutates');
+
+            const mutation = await this.workspaceState.proposeMutation({
+              ref: req.entry.stateRef,
+              operation: req.overwriteStrategy === 'append' ? 'update' : 'update',
+              payload: {
+                content: req.entry.content,
+                tags: req.entry.tags,
+                metadata: req.entry.metadata,
+                confidence: req.entry.confidence,
+                evidenceRef: req.entry.evidenceRef,
+              },
+              reason: `Run ${run.id} turn ${turnIndex} proposed workspace-state mutation`,
+              expectedVersion: req.entry.stateRef.version,
+              idempotencyKey: `mem:${run.id}:${turnIndex}:${req.entry.stateRef.resourceType}:${req.entry.stateRef.resourceId}`,
+            });
+
+            this.emitEvent({
+              id: eventId(),
+              type: 'resource_mutation_committed',
+              runId: run.id,
+              agentId: this.definition.id,
+              turnIndex,
+              timestamp: Date.now(),
+              data: {
+                resourceType: req.entry.stateRef.resourceType,
+                resourceId: req.entry.stateRef.resourceId,
+                accepted: mutation.accepted,
+                reason: mutation.rejectionReason,
+              },
+            });
+            await this.appendExecutionNode(run.id, {
+              turnIndex,
+              kind: 'resource_mutation',
+              phase: 'mutation',
+              actor: this.buildActorRef('system', 'workspace-state', 'Workspace State'),
+              resource: resourceRef,
+              status: mutation.accepted ? 'success' : 'blocked',
+              summary: mutation.accepted
+                ? `Workspace mutation committed for ${req.entry.stateRef.resourceType}/${req.entry.stateRef.resourceId}`
+                : `Workspace mutation rejected for ${req.entry.stateRef.resourceType}/${req.entry.stateRef.resourceId}`,
+              metadata: mutation.snapshot ? { snapshot: mutation.snapshot } : { rejectionReason: mutation.rejectionReason },
+            }, 'mutates');
+
+            if (!mutation.accepted) {
+              continue;
+            }
+          }
+
           const entry = await this.memory.write(req);
           this.emitEvent({
             id: eventId(),
@@ -1169,6 +2059,18 @@ export class AgentRuntime {
             turnIndex,
             entry,
           }, { runId: run.id, turnIndex });
+          await this.appendTranscriptEntry({
+            runId: run.id,
+            agentId: this.definition.id,
+            turnIndex,
+            kind: 'system_note',
+            content: `Memory write recorded to ${entry.tier}/${entry.scope}: ${entry.content}`,
+            metadata: {
+              entryId: entry.id,
+              tier: entry.tier,
+              scope: entry.scope,
+            },
+          });
         }
         return { written: proposal.writes.length };
       }
@@ -1203,6 +2105,28 @@ export class AgentRuntime {
             reason: proposal.reason,
           },
         });
+          await this.appendExecutionNode(run.id, {
+            turnIndex,
+            kind: 'capability',
+            phase: 'execution',
+            actor: this.buildActorRef('remote_agent', proposal.targetAgentId, proposal.targetAgentId),
+            capabilityName: proposal.targetAgentId,
+            status: 'pending',
+            summary: `Handoff initiated to ${proposal.targetAgentId}`,
+            metadata: {
+              reason: proposal.reason,
+            },
+          }, 'invoked');
+          await this.appendTranscriptEntry({
+            runId: run.id,
+            agentId: this.definition.id,
+            turnIndex,
+            kind: 'handoff',
+            content: `Handoff to ${proposal.targetAgentId}: ${proposal.reason}`,
+            metadata: {
+              targetAgentId: proposal.targetAgentId,
+            },
+          });
           const handler = this.handoffHandlers.get(proposal.targetAgentId);
           if (handler) {
             const handoff = await handler({
@@ -1277,6 +2201,29 @@ export class AgentRuntime {
             riskScore: proposal.riskScore,
           },
         });
+          await this.appendExecutionNode(run.id, {
+            turnIndex,
+            kind: 'approval',
+            phase: 'approval',
+            actor: this.buildActorRef('agent', this.definition.id, this.definition.name),
+            status: 'pending',
+            summary: `Approval explicitly requested for ${proposal.action}`,
+            metadata: {
+              reason: proposal.reason,
+              riskScore: proposal.riskScore,
+            },
+          }, 'approved_by');
+          await this.appendTranscriptEntry({
+            runId: run.id,
+            agentId: this.definition.id,
+            turnIndex,
+            kind: 'approval_event',
+            content: `Approval requested: ${proposal.action} (${proposal.reason})`,
+            metadata: {
+              action: proposal.action,
+              riskScore: proposal.riskScore,
+            },
+          });
           return {
             action: proposal.action,
             reason: proposal.reason,
@@ -1411,6 +2358,10 @@ export class AgentRuntime {
     const memorySections = await this.buildMemoryContextSections(run.id);
     sections.push(...memorySections);
 
+    // Inject governed workspace state if an adapter is connected
+    const workspaceSections = await this.buildWorkspaceStateSections();
+    sections.push(...workspaceSections);
+
     const beforeCompile = await this.runHooks('beforeContextCompile', {
       runId: run.id,
       agentId: this.definition.id,
@@ -1421,14 +2372,14 @@ export class AgentRuntime {
       throw new Error(`Context compilation denied by hook: ${beforeCompile.reasons.join('; ')}`);
     }
 
-    const plan = this.context.compile({
+    const plan = this.context.compileWithPolicy({
       maxTokens: this.estimateContextBudget(run),
       sections,
       includeMemory: memorySections.length > 0,
       includeTools: this.tools.getAll().length > 0,
       includeHistory: run.turns.length > 0,
       maxHistoryTurns: DEFAULT_HISTORY_TURNS,
-    });
+    }, this.retrievalPolicy);
 
     const afterCompile = await this.runHooks('afterContextCompile', {
       runId: run.id,
@@ -1587,6 +2538,79 @@ export class AgentRuntime {
       });
     }
 
+    // Governed memory entries stored locally but classified by kind
+    const derivedEntries = await this.memory.getDerivedMemory(5);
+    if (derivedEntries.length > 0) {
+      sections.push({
+        id: 'memory-derived',
+        source: 'derived_memory',
+        content: this.serializeMemoryEntries('Derived summaries', derivedEntries),
+        priority: 78,
+        budgetTokens: 350,
+      });
+    }
+
+    const evidenceEntries = await this.memory.getEvidenceEntries(3);
+    if (evidenceEntries.length > 0) {
+      sections.push({
+        id: 'memory-evidence',
+        source: 'evidence',
+        content: this.serializeMemoryEntries('Evidence references', evidenceEntries),
+        priority: 55,
+        budgetTokens: 200,
+      });
+    }
+
+    // Workspace-state entries stored in runtime memory (vs. adapter-provided)
+    const wsEntries = await this.memory.getWorkspaceState({ limit: 5 });
+    if (wsEntries.length > 0) {
+      sections.push({
+        id: 'memory-workspace-state',
+        source: 'workspace_state',
+        content: this.serializeMemoryEntries('Workspace state (local)', wsEntries),
+        priority: 88,
+        budgetTokens: 400,
+      });
+    }
+
+    return sections;
+  }
+
+  /** Build context sections from the external workspace-state adapter. */
+  private async buildWorkspaceStateSections(): Promise<ContextSectionInput[]> {
+    if (!this.workspaceState) return [];
+    const sections: ContextSectionInput[] = [];
+
+    try {
+      const resources = await this.workspaceState.getResources({ limit: 8 });
+      if (resources.length > 0) {
+        const lines = resources.map(
+          (r) => `- [${r.ref.resourceType}/${r.ref.resourceId}] (as of ${r.asOf}) ${r.summary}`,
+        );
+        sections.push({
+          id: 'workspace-state-external',
+          source: 'workspace_state',
+          content: `Authoritative workspace state:\n${lines.join('\n')}`,
+          priority: 92,
+          budgetTokens: 500,
+        });
+      }
+
+      const evidence = await this.workspaceState.getEvidence({ limit: 5 });
+      if (evidence.length > 0) {
+        const lines = evidence.map((e) => `- ${e.summary}`);
+        sections.push({
+          id: 'evidence-external',
+          source: 'evidence',
+          content: `Evidence:\n${lines.join('\n')}`,
+          priority: 58,
+          budgetTokens: 250,
+        });
+      }
+    } catch {
+      // Adapter failures must not break the run; fall back to memory-only context.
+    }
+
     return sections;
   }
 
@@ -1620,7 +2644,336 @@ export class AgentRuntime {
     return parts.join('\n').trim();
   }
 
-  private finalizeRun(run: Run): RunResult {
+  private async appendTranscriptEntry(
+    entry: Omit<TranscriptEntry, 'id' | 'timestamp'> & Partial<Pick<TranscriptEntry, 'id' | 'timestamp'>>,
+  ): Promise<TranscriptEntry> {
+    const normalized: TranscriptEntry = {
+      ...entry,
+      id: entry.id ?? `trn_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      timestamp: entry.timestamp ?? Date.now(),
+      metadata: entry.metadata ? { ...entry.metadata } : undefined,
+    };
+
+    await this.transcripts.append(normalized);
+    return normalized;
+  }
+
+  private isBlockedResult(result: unknown): boolean {
+    return !!(
+      result &&
+      typeof result === 'object' &&
+      'blocked' in result &&
+      (result as ProposalControlResult).blocked === true
+    );
+  }
+
+  private buildTurnOutcome(
+    turn: Turn,
+    result: unknown,
+  ): TurnOutcome {
+    const toolExecutionSummaries = this.summarizeToolExecutionResult(turn.index, result);
+    const runState = this.getNextState(turn.proposal, result);
+
+    return {
+      turnIndex: turn.index,
+      output: this.buildTurnOutput(turn, result),
+      matchedTools: turn.proposal.type === 'tool_call'
+        ? Array.from(new Set(turn.proposal.toolCalls.map((toolCall) => toolCall.name)))
+        : [],
+      matchedHandoffs: turn.proposal.type === 'handoff'
+        ? [turn.proposal.targetAgentId]
+        : [],
+      policyDecision: (result as ProposalControlResult | undefined)?.policyDecision,
+      approval: this.buildApprovalStateSnapshotForTurn(turn.proposal, result),
+      toolExecutionSummaries,
+      usage: { ...turn.usage },
+      stopReason: this.getTurnStopReason(runState, turn.proposal, result, toolExecutionSummaries),
+      runState,
+    };
+  }
+
+  private buildTurnOutput(turn: Turn, result: unknown): string {
+    const control = result as ProposalControlResult | undefined;
+    if (control?.output) {
+      return control.output;
+    }
+
+    if (Array.isArray(result)) {
+      const outputs = result
+        .map((execution) => execution.result.uiOutput ?? execution.result.llmOutput)
+        .filter((value) => typeof value === 'string' && value.trim().length > 0);
+
+      if (outputs.length > 0) {
+        return outputs.join('\n');
+      }
+    }
+
+    switch (turn.proposal.type) {
+      case 'final_answer':
+        return turn.proposal.answer;
+      case 'memory_write':
+        return `Recorded ${turn.proposal.writes.length} memory write${turn.proposal.writes.length === 1 ? '' : 's'}.`;
+      case 'handoff':
+        return `Handoff requested to ${turn.proposal.targetAgentId}: ${turn.proposal.reason}`;
+      case 'approval_request':
+        return `Approval requested: ${turn.proposal.action}`;
+      default:
+        return turn.modelOutput;
+    }
+  }
+
+  private summarizeToolExecutionResult(
+    turnIndex: number,
+    result: unknown,
+  ): ToolExecutionSummary[] {
+    if (!Array.isArray(result)) {
+      return (result as ProposalControlResult | undefined)?.toolExecutionSummaries?.map((summary) => ({
+        ...summary,
+      })) ?? [];
+    }
+
+    return result.map((execution) => ({
+      toolName: execution.toolCall.name,
+      turnIndex,
+      success: execution.result.success !== false,
+      outcome: execution.outcome ?? this.classifyToolExecutionOutcome(execution),
+      durationMs: execution.durationMs,
+      error: execution.result.error,
+      costUSD: execution.result.metrics?.costUSD,
+    }));
+  }
+
+  private buildApprovalStateSnapshotForTurn(
+    proposal: ActionProposal,
+    result: unknown,
+  ): ApprovalStateSnapshot {
+    const control = result as ProposalControlResult | undefined;
+
+    if (control?.approvalDecision) {
+      return {
+        status: control.approvalDecision.approved ? 'approved' : 'denied',
+        requestId: control.approvalDecision.requestId,
+        approver: control.approvalDecision.decidedBy,
+        reason: control.approvalDecision.reason,
+        decidedAt: control.approvalDecision.decidedAt,
+      };
+    }
+
+    if (control?.waitingForApproval || proposal.type === 'approval_request') {
+      return {
+        status: 'requested',
+        requestId: control?.requestId,
+        mode: control?.approvalMode,
+        reason: control?.reasons?.[0],
+      };
+    }
+
+    return { status: 'none' };
+  }
+
+  private getTurnStopReason(
+    runState: RunState,
+    proposal: ActionProposal,
+    result: unknown,
+    toolExecutionSummaries: ToolExecutionSummary[],
+  ): TurnStopReason {
+    const control = result as ProposalControlResult | undefined;
+
+    if (control?.waitingForApproval || proposal.type === 'approval_request' || runState === 'waiting_for_approval') {
+      return 'approval_required';
+    }
+
+    if (runState === 'waiting_for_handoff' || proposal.type === 'handoff') {
+      return 'handoff';
+    }
+
+    if (runState === 'suspended') {
+      return 'waiting_external_event';
+    }
+
+    if (runState === 'failed') {
+      if (toolExecutionSummaries.some((summary) => !summary.success)) {
+        return 'tool_error';
+      }
+      if (control?.policyDecision || control?.approvalDecision || control?.reasons?.length) {
+        return 'policy_blocked';
+      }
+      return proposal.type === 'tool_call' ? 'tool_error' : 'policy_blocked';
+    }
+
+    if (toolExecutionSummaries.some((summary) => !summary.success)) {
+      return 'tool_error';
+    }
+
+    return 'completed';
+  }
+
+  private buildContextPlanSummary(plan: ContextPlan | null | undefined): ContextPlanSummary | undefined {
+    if (!plan) return undefined;
+
+    return {
+      totalTokens: plan.totalTokens,
+      budgetTokens: plan.budgetTokens,
+      sectionCount: plan.sections.length,
+      hadTruncation: plan.hadTruncation,
+      sectionIds: plan.sections.map((section) => section.id),
+    };
+  }
+
+  private buildProposalSummary(proposal: ActionProposal): string {
+    switch (proposal.type) {
+      case 'final_answer':
+        return proposal.answer.slice(0, 160);
+      case 'tool_call':
+        return proposal.toolCalls.map((toolCall) => toolCall.name).join(', ');
+      case 'memory_write':
+        return `${proposal.writes.length} memory write(s)`;
+      case 'handoff':
+        return `${proposal.targetAgentId}: ${proposal.reason}`;
+      case 'approval_request':
+        return `${proposal.action}: ${proposal.reason}`;
+      default:
+        return 'proposal';
+    }
+  }
+
+  private buildProposalMetadata(proposal: ActionProposal): Record<string, unknown> {
+    switch (proposal.type) {
+      case 'tool_call':
+        return {
+          toolCalls: proposal.toolCalls.map((toolCall) => ({
+            id: toolCall.id,
+            name: toolCall.name,
+          })),
+        };
+      case 'memory_write':
+        return {
+          writes: proposal.writes.length,
+        };
+      case 'handoff':
+        return {
+          targetAgentId: proposal.targetAgentId,
+        };
+      case 'approval_request':
+        return {
+          action: proposal.action,
+          riskScore: proposal.riskScore,
+        };
+      case 'final_answer':
+      default:
+        return {};
+    }
+  }
+
+  private stateRefToResourceRef(stateRef?: MemoryEntry['stateRef']): ResourceRef | undefined {
+    if (!stateRef) return undefined;
+    return {
+      resourceType: stateRef.resourceType,
+      resourceId: stateRef.resourceId,
+      version: stateRef.version,
+    };
+  }
+
+  private collectRoutedMatches(run: Run): RoutedCapabilityMatch[] {
+    const matches: RoutedCapabilityMatch[] = [];
+    const seen = new Set<string>();
+
+    for (const turn of run.turns) {
+      if (turn.proposal.type === 'tool_call') {
+        for (const toolCall of turn.proposal.toolCalls) {
+          const key = `tool:${toolCall.name}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const capability = this.executionSurface.get(toolCall.name);
+          matches.push({
+            kind: 'tool',
+            name: toolCall.name,
+            source: capability?.source,
+            safetyClass: capability?.safetyClass,
+          });
+        }
+        continue;
+      }
+
+      if (turn.proposal.type === 'handoff') {
+        const key = `handoff:${turn.proposal.targetAgentId}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        matches.push({
+          kind: 'handoff',
+          name: turn.proposal.targetAgentId,
+        });
+      }
+    }
+
+    return matches;
+  }
+
+  private buildApprovalStateSnapshotForRun(run: Run): ApprovalStateSnapshot {
+    const pending = this.approvals.getPending()
+      .filter((request) => request.runId === run.id)
+      .sort((a, b) => b.createdAt - a.createdAt)[0];
+
+    if (pending) {
+      return {
+        status: 'requested',
+        requestId: pending.id,
+        mode: pending.mode,
+        reason: pending.reason,
+      };
+    }
+
+    const latestDecision = run.approvalDecisions.at(-1);
+    if (latestDecision) {
+      return {
+        status: latestDecision.approved ? 'approved' : 'denied',
+        requestId: latestDecision.requestId,
+        approver: latestDecision.decidedBy,
+        reason: latestDecision.reason,
+        decidedAt: latestDecision.decidedAt,
+      };
+    }
+
+    return { status: 'none' };
+  }
+
+  private async buildRunSessionSnapshot(run: Run): Promise<RunSessionSnapshot> {
+    const transcriptEntries = await this.transcripts.list(run.id);
+    const transcript = await this.transcripts.getRef(run.id);
+    const executionGraph = await this.executionGraphs.getRef(run.id);
+    const checkpoints = this.enableCheckpoints
+      ? await this.checkpoints.list(run.id)
+      : [];
+
+    return {
+      runId: run.id,
+      agentId: run.agentId,
+      prompt: run.input,
+      compiledContextSummary: this.buildContextPlanSummary(this.latestContextPlans.get(run.id)),
+      routedMatches: this.collectRoutedMatches(run),
+      toolExecutionSummaries: run.turnOutcomes.flatMap((outcome) =>
+        outcome.toolExecutionSummaries.map((summary) => ({ ...summary })),
+      ),
+      streamEventSummary: this.eventLog.getByRun(run.id).map((event) => ({
+        type: event.type,
+        timestamp: event.timestamp,
+        turnIndex: event.turnIndex,
+      })),
+      checkpointRefs: checkpoints.map((checkpoint) => checkpoint.id),
+      transcript,
+      executionGraph,
+      transcriptEntries: transcriptEntries.map((entry) => ({
+        ...entry,
+        metadata: entry.metadata ? { ...entry.metadata } : undefined,
+      })),
+      bootstrapReport: this.getBootstrapReport(),
+      approvalState: this.buildApprovalStateSnapshotForRun(run),
+      createdAt: run.createdAt,
+      updatedAt: run.updatedAt,
+    };
+  }
+
+  private async finalizeRun(run: Run): Promise<RunResult> {
     run.updatedAt = Date.now();
 
     const isTerminal = run.state === 'completed' || run.state === 'failed';
@@ -1658,19 +3011,46 @@ export class AgentRuntime {
       });
     }
 
-    return this.buildRunResult(run);
+    await this.appendExecutionNode(run.id, {
+      turnIndex: run.turns.at(-1)?.index,
+      kind: 'completion',
+      phase: 'completion',
+      actor: this.buildActorRef('system', this.definition.id, this.definition.name),
+      status: run.state === 'failed' ? 'failure' : 'success',
+      summary: `Run ${run.state}`,
+      metadata: {
+        output: run.output,
+        error: run.error,
+      },
+    });
+
+    return await this.buildRunResult(run);
   }
 
   /** Build the final run result. */
-  private buildRunResult(run: Run): RunResult {
-    // Emit audit bundle (fire-and-forget)
-    this.emitAuditBundle(run).catch(() => {});
+  private async buildRunResult(run: Run): Promise<RunResult> {
+    await this.emitAuditBundle(run).catch(() => {});
+
+    const session = await this.buildRunSessionSnapshot(run);
+    this.latestSessionSnapshots.set(run.id, session);
+    await this.persistRunState(run, session);
+    await this.persistThreadState(run, session);
+    const executionGraph = await this.executionGraphs.getGraph(run.id);
 
     return {
       run,
       output: run.output ?? run.error ?? '',
       events: this.eventLog.getByRun(run.id),
       usage: run.totalUsage,
+      turnOutcomes: run.turnOutcomes.map((outcome) => ({
+        ...outcome,
+        matchedTools: [...outcome.matchedTools],
+        matchedHandoffs: [...outcome.matchedHandoffs],
+        toolExecutionSummaries: outcome.toolExecutionSummaries.map((summary) => ({ ...summary })),
+      })),
+      session,
+      executionGraph,
+      bootstrapReport: this.getBootstrapReport(),
     };
   }
 
@@ -1678,20 +3058,25 @@ export class AgentRuntime {
   private async emitAuditBundle(run: Run): Promise<void> {
     const toolExecutions = run.turns
       .filter((t) => t.proposal.type === 'tool_call')
-      .flatMap((t, turnIdx) => {
-        const results = t.result as Array<{ toolCall: ToolCall; result: { llmOutput: string; success?: boolean }; durationMs: number }> | undefined;
+      .flatMap((t) => {
+        const results = t.result as Array<{
+          toolCall: ToolCall;
+          result: { llmOutput: string; success?: boolean; error?: string };
+          durationMs: number;
+        }> | undefined;
         if (!Array.isArray(results)) {
           return [];
         }
         return results.map((r) => ({
           toolName: r.toolCall.name,
-          turnIndex: turnIdx,
+          turnIndex: t.index,
           success: r.result.success !== false,
           durationMs: r.durationMs,
+          error: r.result.error,
         }));
       });
 
-    await this.audit.emit({
+    const bundle = await this.audit.emit({
       runId: run.id,
       agentId: this.definition.id,
       runStartedAt: run.createdAt,
@@ -1701,9 +3086,37 @@ export class AgentRuntime {
       totalSpendUSD: this.payments?.getRunSpend() ?? 0,
       turnCount: run.turns.length,
       events: this.eventLog.getByRun(run.id),
-      policyDecisions: [],
-      approvalDecisions: [],
-      toolExecutions,
+      policyDecisions: run.policyDecisions,
+      approvalDecisions: run.approvalDecisions,
+      toolExecutions: toolExecutions.length > 0
+        ? toolExecutions
+        : run.turnOutcomes.flatMap((outcome) =>
+            outcome.toolExecutionSummaries.map((summary) => ({ ...summary })),
+          ),
+    });
+    await this.appendExecutionNode(run.id, {
+      turnIndex: run.turns.at(-1)?.index,
+      kind: 'evidence_bundle',
+      phase: 'evidence',
+      actor: this.buildActorRef('system', 'audit-emitter', 'Audit Emitter'),
+      status: 'success',
+      summary: `Evidence bundle recorded (${bundle.id})`,
+      metadata: {
+        bundleId: bundle.id,
+        contentHash: bundle.contentHash,
+      },
+    }, 'recorded_as');
+    this.emitEvent({
+      id: eventId(),
+      type: 'evidence_bundle_recorded',
+      runId: run.id,
+      agentId: this.definition.id,
+      turnIndex: run.turns.at(-1)?.index,
+      timestamp: Date.now(),
+      data: {
+        bundleId: bundle.id,
+        contentHash: bundle.contentHash,
+      },
     });
   }
 }

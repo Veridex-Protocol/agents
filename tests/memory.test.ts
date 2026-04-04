@@ -79,6 +79,54 @@ describe('InMemoryStore', () => {
     const results = await store.search({ limit: 3 });
     expect(results).toHaveLength(3);
   });
+
+  it('searches workspace state references by kind and resource', async () => {
+    await store.write(makeWrite({
+      entry: {
+        tier: 'semantic',
+        kind: 'workspace_state',
+        scope: 'agent',
+        content: 'Deployment revision is ready',
+        confidence: 0.95,
+        ttlMs: 0,
+        tags: ['deployment'],
+        provenance: 'control_plane',
+        stateRef: {
+          resourceType: 'deployment',
+          resourceId: 'deploy_123',
+          authority: 'control_plane',
+          version: 'rev_7',
+        },
+      },
+    }));
+    await store.write(makeWrite({
+      entry: {
+        tier: 'semantic',
+        kind: 'workspace_state',
+        scope: 'agent',
+        content: 'Incident is open',
+        confidence: 0.9,
+        ttlMs: 0,
+        tags: ['incident'],
+        provenance: 'control_plane',
+        stateRef: {
+          resourceType: 'incident',
+          resourceId: 'inc_456',
+          authority: 'control_plane',
+        },
+      },
+    }));
+
+    const results = await store.search({
+      kind: 'workspace_state',
+      resourceType: 'deployment',
+      resourceId: 'deploy_123',
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0].stateRef?.resourceType).toBe('deployment');
+    expect(results[0].stateRef?.resourceId).toBe('deploy_123');
+  });
 });
 
 // ── MemoryManager ──
@@ -126,5 +174,52 @@ describe('MemoryManager', () => {
     const entries = await manager.getWorkingMemory('run_1');
 
     expect(entries.length).toBeGreaterThanOrEqual(0);
+  });
+
+  it('returns workspace state entries via helper', async () => {
+    await manager.write(makeWrite({
+      entry: {
+        tier: 'semantic',
+        kind: 'workspace_state',
+        scope: 'agent',
+        content: 'Task queue depth is elevated',
+        confidence: 0.92,
+        ttlMs: 0,
+        tags: ['task'],
+        provenance: 'control_plane',
+        stateRef: {
+          resourceType: 'task',
+          resourceId: 'task_42',
+          authority: 'control_plane',
+        },
+      },
+    }));
+
+    const entries = await manager.getWorkspaceState({ resourceType: 'task' });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].kind).toBe('workspace_state');
+  });
+
+  it('returns derived memory entries via helper', async () => {
+    await manager.write(makeWrite({
+      entry: {
+        tier: 'episodic',
+        kind: 'derived_memory',
+        scope: 'agent',
+        content: 'Daily summary of failed payouts',
+        confidence: 0.88,
+        ttlMs: 0,
+        tags: ['summary'],
+        provenance: 'agent',
+        derivation: {
+          strategy: 'summary',
+          sourceResourceIds: ['incident_1', 'payout_7'],
+        },
+      },
+    }));
+
+    const entries = await manager.getDerivedMemory();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].derivation?.strategy).toBe('summary');
   });
 });

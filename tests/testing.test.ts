@@ -23,17 +23,77 @@ function makeInteraction(content: string, turnIndex = 0): RecordedInteraction {
 }
 
 function makeRunResult(output: string, events: TraceEvent[] = []): RunResult {
+  const createdAt = Date.now();
   const run: Run = {
     id: 'run_1',
     agentId: 'agent_1',
     state: 'completed',
     input: 'test input',
     turns: [],
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
+    turnOutcomes: [],
+    createdAt,
+    updatedAt: createdAt,
     totalUsage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 },
+    policyDecisions: [],
+    approvalDecisions: [],
   };
-  return { run, output, events, usage: run.totalUsage };
+  const bootstrapReport = {
+    agentId: run.agentId,
+    generatedAt: createdAt,
+    modelProviders: ['mock'],
+    defaultModelProvider: 'mock',
+    capabilityCount: 0,
+    capabilitySources: [],
+    activePolicyCount: 0,
+    approvalManagerEnabled: true,
+    checkpointManagerEnabled: false,
+    transcriptStoreMode: 'memory' as const,
+    transportAvailability: {
+      mcp: false,
+      acp: false,
+      a2a: false,
+    },
+    veridex: {
+      identityWired: false,
+      paymentsWired: false,
+      controlPlaneConnected: null,
+    },
+    defaults: {
+      maxTurns: 25,
+      contextTokenBudget: 4000,
+      historyTurns: 6,
+    },
+  };
+
+  const session = {
+    runId: run.id,
+    agentId: run.agentId,
+    prompt: run.input,
+    routedMatches: [],
+    toolExecutionSummaries: [],
+    streamEventSummary: [],
+    checkpointRefs: [],
+    transcript: {
+      runId: run.id,
+      mode: 'memory' as const,
+      entryCount: 0,
+    },
+    transcriptEntries: [],
+    bootstrapReport,
+    approvalState: { status: 'none' as const },
+    createdAt,
+    updatedAt: createdAt,
+  };
+
+  return {
+    run,
+    output,
+    events,
+    usage: run.totalUsage,
+    turnOutcomes: [],
+    session,
+    bootstrapReport,
+  };
 }
 
 describe('ReplayProvider', () => {

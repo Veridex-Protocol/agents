@@ -5,8 +5,9 @@
  * Context compilation types for the Veridex Agent Fabric.
  *
  * The context compiler assembles bounded context from system policy,
- * instructions, run state, memory, tools, budget, and constraints.
- * Each section has source, budget, priority, and truncation strategy.
+ * instructions, run state, runtime memory, governed workspace state,
+ * evidence references, tools, budget, and constraints. Each section
+ * has source, budget, priority, and truncation strategy.
  */
 
 // ── Context Section ──
@@ -35,8 +36,12 @@ export interface ContextSection {
 export type ContextSource =
   | 'system'
   | 'instructions'
+  | 'context'
   | 'run_state'
   | 'memory'
+  | 'workspace_state'
+  | 'derived_memory'
+  | 'evidence'
   | 'tools'
   | 'budget'
   | 'payment_constraints'
@@ -100,4 +105,32 @@ export interface ContextSectionInput {
   budgetTokens?: number;
   /** Truncation strategy (default: 'tail') */
   truncation?: TruncationStrategy;
+}
+
+// ── Retrieval Policy ──
+
+/** Per-source defaults applied by a retrieval policy. */
+export interface ContextSourceConfig {
+  /** Default priority for this source if the section does not specify one */
+  defaultPriority: number;
+  /** Default token budget for this source */
+  defaultBudgetTokens?: number;
+  /** Default truncation strategy */
+  defaultTruncation?: TruncationStrategy;
+}
+
+/**
+ * A retrieval policy defines the canonical ordering and per-source
+ * defaults the compiler uses when assembling context.
+ *
+ * Sections are first grouped by sourceOrder position, then by
+ * individual priority within each group. This ensures governed
+ * workspace state is always considered before transient memory
+ * regardless of the caller-supplied priority numbers.
+ */
+export interface ContextRetrievalPolicy {
+  /** Canonical source ordering (first = highest precedence group). */
+  sourceOrder: ContextSource[];
+  /** Per-source config overrides. */
+  sourceConfig?: Partial<Record<ContextSource, ContextSourceConfig>>;
 }

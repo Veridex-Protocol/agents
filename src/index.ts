@@ -35,6 +35,7 @@
 // ── Core Runtime ──
 export { AgentRuntime } from './runtime/AgentRuntime';
 export { createAgent } from './runtime/createAgent';
+export { buildRuntimeBootstrapReport } from './runtime/bootstrap';
 
 // ── Types ──
 export type {
@@ -50,8 +51,14 @@ export type {
   Run,
   RunState,
   Turn,
+  TurnStopReason,
+  TurnOutcome,
   TurnResult,
   RunResult,
+  RunSessionSnapshot,
+  RoutedCapabilityMatch,
+  ApprovalStateSnapshot,
+  ContextPlanSummary,
   ResumeRunOptions,
   RunCheckpointState,
   // Tools
@@ -64,24 +71,43 @@ export type {
   ToolAttachment,
   ToolMetrics,
   CostEstimate,
+  // Execution
+  CapabilitySource,
+  ExecutionCapabilityKind,
+  ExecutableCapability,
+  ExecutionSurfaceSummary,
   // Memory
   MemoryTier,
   MemoryEntry,
+  MemoryEntryKind,
   MemoryStore,
   MemoryQuery,
   MemoryWriteRequest,
   MemoryConfig,
+  MemoryStateAuthority,
+  MemoryStateReference,
+  MemoryEvidenceReference,
+  MemoryDerivation,
   MemoryProvenance,
   MemoryScope,
   TierConfig,
   CompactOptions,
   CompactResult,
+  // Transcript
+  TranscriptEntryKind,
+  TranscriptEntry,
+  TranscriptReplayOptions,
+  TranscriptRef,
+  TranscriptStore,
+  TranscriptStoreMode,
   // Context
   ContextSection,
   ContextSource,
   ContextPlan,
   ContextCompilerOptions,
   ContextSectionInput,
+  ContextRetrievalPolicy,
+  ContextSourceConfig,
   TruncationStrategy,
   // Hooks
   HookPhase,
@@ -97,6 +123,7 @@ export type {
   // Events
   TraceEventType,
   TraceEvent,
+  BootstrapReportGeneratedEvent,
   // Models
   ModelConfig,
   ModelProvider,
@@ -116,6 +143,40 @@ export type {
   PolicyVerdict,
   PolicyDecision,
   PolicyCheckResult,
+  // Bootstrap
+  TransportKind,
+  TransportAvailability,
+  CapabilitySourceCount,
+  RuntimeBootstrapReport,
+  // Accountability
+  IdempotencyKey,
+  ExecutionPhase,
+  ExecutionNodeKind,
+  ExecutionNodeStatus,
+  ExecutionEdgeRelation,
+  ToolExecutionOutcome,
+  ActorRef,
+  ResourceRef,
+  SideEffectReceipt,
+  ExecutionNode,
+  ExecutionEdge,
+  ExecutionGraph,
+  ExecutionGraphRef,
+  StoredRunRecord,
+  ThreadRecord,
+  RunStore,
+  ThreadStore,
+  ExecutionGraphStore,
+  MemoryRecordKind,
+  EvidenceRef,
+  MemoryProposal,
+  MemoryValidationIssueCode,
+  MemoryValidationIssue,
+  MemoryProposalValidationResult,
+  MemoryProposalValidator,
+  BrowserSessionRef,
+  BrowserArtifactRef,
+  BrowserCapabilityMetadata,
 } from './types';
 
 // ── Events ──
@@ -136,6 +197,7 @@ export type { ToolExecutionResult } from './tools/ToolExecutor';
 export { ToolValidator } from './tools/ToolValidator';
 export { tool } from './tools/tool';
 export type { ToolOptions } from './tools/tool';
+export { ExecutionSurfaceRegistry } from './execution';
 
 // ── Hooks ──
 export { HookRegistry } from './hooks/HookRegistry';
@@ -144,10 +206,20 @@ export type { HookRunResult } from './hooks/HookRunner';
 
 // ── Context ──
 export { ContextCompiler } from './context/ContextCompiler';
+export { DEFAULT_RETRIEVAL_POLICY } from './context/ContextCompiler';
 
 // ── Memory ──
 export { MemoryManager } from './memory/MemoryManager';
 export { InMemoryStore } from './memory/InMemoryStore';
+export { InMemoryTranscriptStore, FileTranscriptStore } from './transcript';
+export {
+  InMemoryRunStore,
+  FileRunStore,
+  InMemoryThreadStore,
+  FileThreadStore,
+  InMemoryExecutionGraphStore,
+  FileExecutionGraphStore,
+} from './accountability';
 
 // ── Checkpoints ──
 export { CheckpointManager, InMemoryCheckpointStore } from './checkpoints/CheckpointManager';
@@ -158,6 +230,16 @@ export { CoreAdapter } from './integrations/CoreAdapter';
 export type { CoreAdapterConfig } from './integrations/CoreAdapter';
 export { PaymentsAdapter } from './integrations/PaymentsAdapter';
 export type { PaymentsAdapterConfig } from './integrations/PaymentsAdapter';
+export { WorkspaceStateAdapter } from './integrations/WorkspaceStateAdapter';
+export type {
+  WorkspaceStateProvider,
+  WorkspaceResourceSnapshot,
+  EvidenceSnapshot,
+  WorkspaceStateQuery,
+  EvidenceQuery,
+  WorkspaceStateMutation,
+  WorkspaceStateMutationResult,
+} from './integrations/WorkspaceStateAdapter';
 
 // ── Policy ──
 export { PolicyEngine, blockSafetyClasses, requireApprovalFor, maxRunSpendUSD, maxTokenBudget, allowChains } from './policy';
@@ -169,7 +251,18 @@ export type { ApprovalMode, ApprovalRequest, ApprovalDecision, ApprovalHandler, 
 
 // ── Audit ──
 export { AuditEmitter, InMemoryAuditSink } from './audit';
+export { TraceEnvelopeBuilder, UnifiedTraceCollector, InMemoryEnvelopeSink } from './audit';
 export type { AuditBundle, ToolExecutionSummary, AuditExportFormat, AuditSink } from './audit';
+export type {
+  TraceEnvelope,
+  TraceEnvelopeBuildParams,
+  ReasoningSnapshot,
+  EnvelopeStorageReceipt,
+  EnvelopeSettlementProof,
+  EnvelopeVerificationResult,
+  EnvelopeSink,
+  UnifiedTraceCollectorOptions,
+} from './audit';
 
 // ── Testing ──
 export { ReplayProvider, TraceRecorder, compareTraces, serializeGoldenTrace, deserializeGoldenTrace } from './testing';
@@ -177,6 +270,8 @@ export type { RecordedInteraction, GoldenTrace, TraceComparisonResult, EventDiff
 
 // ── Transports ──
 export { MCPServerTransport, ACPTransport, A2ATransport } from './transports';
+export { RetryExecutor, CircuitBreaker, TransportPolicyEvaluator, RemoteCallTracer, CapabilityManifestRegistry } from './transports';
+export { DEFAULT_RETRY_POLICY, DEFAULT_TIMEOUT_POLICY, DEFAULT_CIRCUIT_BREAKER_CONFIG } from './transports';
 export type {
   Transport,
   TransportState,
@@ -193,4 +288,99 @@ export type {
   A2ATask,
   A2ATaskResult,
   A2ATransportConfig,
+  // Transport Hardening
+  RetryPolicy,
+  TimeoutPolicy,
+  CircuitBreakerState,
+  CircuitBreakerConfig,
+  TransportEndpointPolicy,
+  TransportPolicy,
+  CapabilityManifest,
+  RemoteCallOutcome,
+  RemoteCallRecord,
+  PolicyEvaluationResult,
+  RetryExecutorOptions,
+  RetryResult,
+  CircuitBreakerSnapshot,
+  TransportPolicyEvaluatorOptions,
+  RemoteCallTracerOptions,
+  StartCallParams,
+  FinishCallParams,
 } from './transports';
+
+// ── Orchestration ──
+export { TaskGraph, Scheduler, Orchestrator } from './orchestration';
+export type {
+  OrchestrationTask,
+  OrchestrationTaskStatus,
+  OrchestrationTaskPriority,
+  CreateOrchestrationTaskOptions,
+  TaskGraphResult,
+  TeamMember,
+  TeamConfig,
+  SchedulerStrategy,
+  SchedulerConfig,
+  OrchestratorEvent,
+  OrchestratorConfig,
+  OrchestratorResult,
+  AgentExecutor,
+} from './orchestration';
+
+// ── Security ──
+export { SecurityPolicyPackManager } from './security';
+export {
+  injectionDetectionPack,
+  toolPoisoningPack,
+  handoffSafetyPack,
+  modelRestrictionPack,
+  budgetCeilingPack,
+  endpointAllowlistPack,
+} from './security';
+export type {
+  SecurityPolicyPack,
+  SecurityPackManagerOptions,
+  InjectionDetectionPackOptions,
+  ToolPoisoningPackOptions,
+  HandoffSafetyPackOptions,
+  ModelRestrictionPackOptions,
+  BudgetCeilingPackOptions,
+  EndpointAllowlistPackOptions,
+} from './security';
+
+// ── Evals ──
+export { runScenario, runEvalSuite, runPolicyScenarioWithRules } from './evals';
+export {
+  policyPassthroughScenario,
+  policyFinalAnswerPassScenario,
+  contextNoBudgetPressureScenario,
+  contextTruncationScenario,
+  contextPriorityOrderingScenario,
+  circuitBreakerStaysClosedScenario,
+  circuitBreakerOpensScenario,
+  circuitBreakerResetOnSuccessScenario,
+  memoryWriteSearchScenario,
+  memoryEmptyBaselineScenario,
+  injectionDetectionScenario,
+  injectionCleanPassScenario,
+  budgetCeilingBlockScenario,
+  handoffAllowedScenario,
+  handoffBlockedScenario,
+  handoffAllowlistScenario,
+  allBuiltInScenarios,
+} from './evals';
+export type {
+  ScenarioStatus,
+  ScenarioCategory,
+  BaseScenario,
+  PolicyScenario,
+  EvalContextSection,
+  ContextScenario,
+  TransportScenario,
+  MemoryScenario,
+  SecurityScenario,
+  HandoffScenario,
+  EvalScenario,
+  ScenarioResult,
+  AssertionResult,
+  EvalSuiteResult,
+} from './evals';

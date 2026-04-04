@@ -10,21 +10,31 @@
 
 import type { ModelUsage } from './models';
 import type { RunState } from './runtime';
+import type { RuntimeBootstrapReport } from './bootstrap';
 
 // ── Event Types ──
 
 /** All trace event type identifiers. */
 export type TraceEventType =
+  | 'bootstrap_report_generated'
   | 'message_received'
   | 'context_compiled'
   | 'model_call_started'
   | 'model_call_completed'
+  | 'proposal_created'
+  | 'proposal_validated'
   | 'tool_proposed'
+  | 'capability_invoked'
   | 'tool_executed'
   | 'memory_written'
   | 'payment_attempted'
   | 'approval_requested'
+  | 'approval_resolved'
   | 'handoff_initiated'
+  | 'resource_mutation_proposed'
+  | 'resource_mutation_committed'
+  | 'side_effect_receipt_recorded'
+  | 'evidence_bundle_recorded'
   | 'run_checkpointed'
   | 'policy_evaluated'
   | 'hook_executed'
@@ -60,6 +70,11 @@ export interface MessageReceivedEvent extends BaseTraceEvent {
   data: { content: string; source: 'user' | 'system' | 'agent' };
 }
 
+export interface BootstrapReportGeneratedEvent extends BaseTraceEvent {
+  type: 'bootstrap_report_generated';
+  data: { report: RuntimeBootstrapReport };
+}
+
 export interface ContextCompiledEvent extends BaseTraceEvent {
   type: 'context_compiled';
   data: { totalTokens: number; sectionCount: number; hadTruncation: boolean };
@@ -78,9 +93,29 @@ export interface ModelCallCompletedEvent extends BaseTraceEvent {
   };
 }
 
+export interface ProposalCreatedEvent extends BaseTraceEvent {
+  type: 'proposal_created';
+  data: { proposalType: string; summary: string };
+}
+
+export interface ProposalValidatedEvent extends BaseTraceEvent {
+  type: 'proposal_validated';
+  data: { proposalType: string; accepted: boolean; issues?: string[] };
+}
+
 export interface ToolProposedEvent extends BaseTraceEvent {
   type: 'tool_proposed';
   data: { toolName: string; arguments: Record<string, unknown>; safetyClass: string };
+}
+
+export interface CapabilityInvokedEvent extends BaseTraceEvent {
+  type: 'capability_invoked';
+  data: {
+    capabilityName: string;
+    source?: string;
+    safetyClass?: string;
+    idempotencyKey?: string;
+  };
 }
 
 export interface ToolExecutedEvent extends BaseTraceEvent {
@@ -116,9 +151,34 @@ export interface ApprovalRequestedEvent extends BaseTraceEvent {
   data: { action: string; reason: string; riskScore: number };
 }
 
+export interface ApprovalResolvedEvent extends BaseTraceEvent {
+  type: 'approval_resolved';
+  data: { requestId?: string; approved: boolean; approver?: string; reason?: string };
+}
+
 export interface HandoffInitiatedEvent extends BaseTraceEvent {
   type: 'handoff_initiated';
   data: { targetAgentId: string; reason: string };
+}
+
+export interface ResourceMutationProposedEvent extends BaseTraceEvent {
+  type: 'resource_mutation_proposed';
+  data: { resourceType: string; resourceId: string; operation: string; accepted?: boolean };
+}
+
+export interface ResourceMutationCommittedEvent extends BaseTraceEvent {
+  type: 'resource_mutation_committed';
+  data: { resourceType: string; resourceId: string; accepted: boolean; reason?: string };
+}
+
+export interface SideEffectReceiptRecordedEvent extends BaseTraceEvent {
+  type: 'side_effect_receipt_recorded';
+  data: { capabilityName: string; receiptId: string; idempotencyKey: string; status: string };
+}
+
+export interface EvidenceBundleRecordedEvent extends BaseTraceEvent {
+  type: 'evidence_bundle_recorded';
+  data: { bundleId: string; contentHash: string };
 }
 
 export interface RunCheckpointedEvent extends BaseTraceEvent {
@@ -160,16 +220,25 @@ export interface ErrorOccurredEvent extends BaseTraceEvent {
 
 /** Discriminated union of all trace event types. */
 export type TraceEvent =
+  | BootstrapReportGeneratedEvent
   | MessageReceivedEvent
   | ContextCompiledEvent
   | ModelCallStartedEvent
   | ModelCallCompletedEvent
+  | ProposalCreatedEvent
+  | ProposalValidatedEvent
   | ToolProposedEvent
+  | CapabilityInvokedEvent
   | ToolExecutedEvent
   | MemoryWrittenEvent
   | PaymentAttemptedEvent
   | ApprovalRequestedEvent
+  | ApprovalResolvedEvent
   | HandoffInitiatedEvent
+  | ResourceMutationProposedEvent
+  | ResourceMutationCommittedEvent
+  | SideEffectReceiptRecordedEvent
+  | EvidenceBundleRecordedEvent
   | RunCheckpointedEvent
   | PolicyEvaluatedEvent
   | HookExecutedEvent

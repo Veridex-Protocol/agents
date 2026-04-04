@@ -12,6 +12,7 @@ import type {
   ToolCall,
   ToolMetrics,
 } from '../types/tools';
+import type { SideEffectReceipt, ToolExecutionOutcome } from '../types/accountability';
 import type { ToolRegistry } from './ToolRegistry';
 import { ToolValidator } from './ToolValidator';
 
@@ -20,6 +21,8 @@ export interface ToolExecutionResult {
   result: ToolResult;
   durationMs: number;
   retryCount: number;
+  outcome?: ToolExecutionOutcome;
+  receipt?: SideEffectReceipt;
 }
 
 export class ToolExecutor {

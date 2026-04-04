@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ModelRegistry } from '../src/models/ModelRegistry';
-import { ContextCompiler } from '../src/context/ContextCompiler';
+import { ContextCompiler, DEFAULT_RETRIEVAL_POLICY } from '../src/context/ContextCompiler';
+import { WorkspaceStateAdapter } from '../src/integrations/WorkspaceStateAdapter';
 import type { ModelProvider, ModelResponse } from '../src/types/models';
+import type { ContextRetrievalPolicy } from '../src/types/context';
+import type { WorkspaceStateProvider } from '../src/integrations/WorkspaceStateAdapter';
 
 function mockProvider(name: string, response?: ModelResponse): ModelProvider {
   return {
@@ -129,6 +132,23 @@ describe('ContextCompiler', () => {
     expect(plan.hadTruncation).toBe(false);
   });
 
+  it('supports governed workspace and evidence context sources', () => {
+    const plan = compiler.compile({
+      maxTokens: 1000,
+      sections: [
+        { id: 'state', source: 'workspace_state', content: 'Task task_42 is blocked', priority: 80 },
+        { id: 'derived', source: 'derived_memory', content: 'Recent incidents cluster around payout retries', priority: 70 },
+        { id: 'evidence', source: 'evidence', content: 'trace_id=trace_123', priority: 60 },
+      ],
+    });
+
+    expect(plan.sections.map((section) => section.source)).toEqual([
+      'workspace_state',
+      'derived_memory',
+      'evidence',
+    ]);
+  });
+
   it('truncates low-priority sections when over budget', () => {
     const longContent = 'x'.repeat(4000); // ~1000 tokens
 
@@ -224,5 +244,132 @@ describe('ContextCompiler', () => {
 
     // Higher priority sections should be compiled first (and get budget first)
     expect(plan.sections[0].id).toBe('high');
+  });
+
+  // ── compileWithPolicy ──
+
+  it('compileWithPolicy groups by source order then priority', () => {
+    const policy: ContextRetrievalPolicy = {
+      sourceOrder: ['system', 'workspace_state', 'memory', 'tools', 'custom'],
+    };
+    const plan = compiler.compileWithPolicy({
+      maxTokens: 2000,
+      sections: [
+        { id: 'tool-a', source: 'tools', content: 'Tool A', priority: 90 },
+        { id: 'ws-1', source: 'workspace_state', content: 'Task blocked', priority: 50 },
+        { id: 'sys', source: 'system', content: 'Rules', priority: 100 },
+        { id: 'mem', source: 'memory', content: 'Working note', priority: 80 },
+        { id: 'ws-2', source: 'workspace_state', content: 'Deploy ready', priority: 60 },
+      ],
+    });
+
+    const ids = plan.sections.map((s) => s.id);
+    // system first, then workspace_state (higher priority first within group), then memory, then tools
+    expect(ids).toEqual(['sys', 'ws-2', 'ws-1', 'mem', 'tool-a']);
+  });
+
+  it('compileWithPolicy uses default retrieval policy when none given', () => {
+    const plan = compiler.compileWithPolicy({
+      maxTokens: 2000,
+      sections: [
+        { id: 'custom', source: 'custom', content: 'Custom', priority: 100 },
+        { id: 'sys', source: 'system', content: 'System', priority: 50 },
+      ],
+    });
+
+    // system should come before custom in the default policy regardless of priority
+    expect(plan.sections[0].id).toBe('sys');
+    expect(plan.sections[1].id).toBe('custom');
+  });
+
+  it('compileWithPolicy applies per-source config defaults', () => {
+    const policy: ContextRetrievalPolicy = {
+      sourceOrder: ['workspace_state', 'memory'],
+      sourceConfig: {
+        workspace_state: { defaultPriority: 100, defaultBudgetTokens: 50 },
+        memory: { defaultPriority: 60, defaultBudgetTokens: 50 },
+      },
+    };
+
+    const plan = compiler.compileWithPolicy({
+      maxTokens: 5000,
+      sections: [
+        // No explicit priority — should get defaultPriority from config
+        { id: 'ws', source: 'workspace_state', content: 'x'.repeat(400), priority: 0 },
+        { id: 'mem', source: 'memory', content: 'y'.repeat(400), priority: 0 },
+      ],
+    }, policy);
+
+    // workspace_state group comes first in sourceOrder
+    expect(plan.sections[0].id).toBe('ws');
+    // Both should be truncated to 50-token budget (~200 chars)
+    expect(plan.sections[0].wasTruncated).toBe(true);
+    expect(plan.sections[1].wasTruncated).toBe(true);
+  });
+});
+
+// ── WorkspaceStateAdapter ──
+
+describe('WorkspaceStateAdapter', () => {
+  function mockProvider(): WorkspaceStateProvider {
+    return {
+      getResources: vi.fn(async () => [
+        {
+          ref: { resourceType: 'task', resourceId: 'task_1', authority: 'control_plane' as const },
+          summary: 'Task 1 is blocked',
+          asOf: '2026-04-02T00:00:00Z',
+        },
+      ]),
+      getEvidence: vi.fn(async () => [
+        {
+          ref: { traceId: 'trace_abc' },
+          summary: 'Trace shows retry loop',
+        },
+      ]),
+      proposeMutation: vi.fn(async () => ({
+        accepted: true,
+        snapshot: {
+          ref: { resourceType: 'task', resourceId: 'task_1', authority: 'control_plane' as const },
+          summary: 'Task 1 resolved',
+          asOf: '2026-04-02T01:00:00Z',
+        },
+      })),
+    };
+  }
+
+  it('returns resources from provider', async () => {
+    const adapter = new WorkspaceStateAdapter(mockProvider());
+    const resources = await adapter.getResources();
+
+    expect(resources).toHaveLength(1);
+    expect(resources[0].ref.resourceType).toBe('task');
+  });
+
+  it('returns evidence from provider', async () => {
+    const adapter = new WorkspaceStateAdapter(mockProvider());
+    const evidence = await adapter.getEvidence();
+
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0].ref.traceId).toBe('trace_abc');
+  });
+
+  it('proposes mutations through provider', async () => {
+    const provider = mockProvider();
+    const adapter = new WorkspaceStateAdapter(provider);
+
+    const result = await adapter.proposeMutation({
+      ref: { resourceType: 'task', resourceId: 'task_1', authority: 'control_plane' },
+      operation: 'update',
+      payload: { status: 'resolved' },
+      reason: 'Agent determined task is done',
+    });
+
+    expect(result.accepted).toBe(true);
+    expect(provider.proposeMutation).toHaveBeenCalledOnce();
+  });
+
+  it('isAvailable returns true when provider exists', () => {
+    const adapter = new WorkspaceStateAdapter(mockProvider());
+    expect(adapter.isAvailable()).toBe(true);
   });
 });

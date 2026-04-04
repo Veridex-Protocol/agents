@@ -5,6 +5,11 @@ import { createAgent } from '../src/runtime/createAgent';
 import { tool } from '../src/tools/tool';
 import { InMemoryStore } from '../src/memory/InMemoryStore';
 import { InMemoryCheckpointStore } from '../src/checkpoints/CheckpointManager';
+import {
+  InMemoryExecutionGraphStore,
+  InMemoryRunStore,
+  InMemoryThreadStore,
+} from '../src/accountability';
 import type { ModelProvider, ModelResponse, ModelMessage, ModelCompletionOptions } from '../src/types/models';
 import type { AgentDefinition } from '../src/types/agent';
 import type { TraceEvent, RunStartedEvent, RunCompletedEvent } from '../src/types/events';
@@ -293,6 +298,73 @@ describe('AgentRuntime', () => {
     });
   });
 
+  describe('session snapshots and execution surfaces', () => {
+    it('returns bootstrap and transcript-backed session snapshots', async () => {
+      const provider = mockProvider([makeResponse('done')]);
+      const runtime = new AgentRuntime(makeDefinition(), {
+        modelProviders: { mock: provider },
+        transportAvailability: { mcp: true },
+        controlPlaneConnected: false,
+      });
+
+      const result = await runtime.run('test bootstrap state');
+
+      expect(result.bootstrapReport.agentId).toBe('test-agent');
+      expect(result.bootstrapReport.transcriptStoreMode).toBe('memory');
+      expect(result.bootstrapReport.transportAvailability.mcp).toBe(true);
+      expect(result.session.bootstrapReport.capabilityCount).toBe(result.bootstrapReport.capabilityCount);
+      expect(result.session.transcript.mode).toBe('memory');
+      expect(result.session.transcriptEntries.map((entry) => entry.kind)).toEqual(
+        expect.arrayContaining(['system_note', 'user_input', 'model_output']),
+      );
+      expect(runtime.getLatestSessionSnapshot(result.run.id)?.runId).toBe(result.run.id);
+    });
+
+    it('routes adapter capabilities through the unified execution surface registry', async () => {
+      const provider = mockProvider([
+        makeToolCallResponse([{ name: 'lookupCrm', args: { accountId: 'acct_1' } }]),
+        makeResponse('CRM profile retrieved'),
+      ]);
+
+      const runtime = new AgentRuntime(makeDefinition(), {
+        modelProviders: { mock: provider },
+        executionCapabilities: [{
+          name: 'lookupCrm',
+          source: 'adapter',
+          description: 'Look up a customer profile in the CRM adapter',
+          safetyClass: 'read',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              accountId: { type: 'string' },
+            },
+            required: ['accountId'],
+          },
+          adapterHint: 'crm-adapter',
+          execute: async ({ input }) => ({
+            llmOutput: `profile:${(input as { accountId: string }).accountId}`,
+            success: true,
+          }),
+        }],
+      });
+
+      const result = await runtime.run('Look up account acct_1');
+
+      expect(result.run.state).toBe('completed');
+      expect(result.turnOutcomes[0].matchedTools).toContain('lookupCrm');
+      expect(result.turnOutcomes[0].toolExecutionSummaries[0]).toMatchObject({
+        toolName: 'lookupCrm',
+        success: true,
+      });
+      expect(result.session.routedMatches).toContainEqual(
+        expect.objectContaining({ kind: 'tool', name: 'lookupCrm', source: 'adapter' }),
+      );
+      expect(
+        result.bootstrapReport.capabilitySources.find((entry) => entry.source === 'adapter')?.count,
+      ).toBe(1);
+    });
+  });
+
   describe('hooks', () => {
     it('beforeRun hook can deny a run', async () => {
       const provider = mockProvider([makeResponse('should not reach')]);
@@ -390,6 +462,9 @@ describe('AgentRuntime', () => {
       expect(result.run.turns).toHaveLength(1);
       expect(await runtime.listCheckpoints(result.run.id)).toHaveLength(1);
       expect(result.events.some((event) => event.type === 'approval_requested')).toBe(true);
+      expect(result.turnOutcomes[0].stopReason).toBe('approval_required');
+      expect(result.session.approvalState.status).toBe('requested');
+      expect(result.session.checkpointRefs).toHaveLength(1);
     });
 
     it('resumes from a checkpoint and executes the approved tool call', async () => {
@@ -697,6 +772,109 @@ describe('AgentRuntime', () => {
   });
 
   describe('metadata', () => {
+    it('persists durable run/thread state and a replayable execution graph', async () => {
+      const runStore = new InMemoryRunStore();
+      const threadStore = new InMemoryThreadStore();
+      const executionGraphs = new InMemoryExecutionGraphStore();
+
+      const greetTool = tool({
+        name: 'greet',
+        description: 'Greet a user',
+        input: z.object({ name: z.string() }),
+        safetyClass: 'read',
+        async execute({ input }) {
+          return { llmOutput: `Hello, ${input.name}!`, success: true };
+        },
+      });
+
+      const provider = mockProvider([
+        makeToolCallResponse([{ name: 'greet', args: { name: 'Alice' } }]),
+        makeResponse('Done'),
+      ]);
+
+      const runtime = new AgentRuntime(makeDefinition({ tools: [greetTool] }), {
+        modelProviders: { mock: provider },
+        runStore,
+        threadStore,
+        executionGraphStore: executionGraphs,
+      });
+
+      const result = await runtime.run('Say hi');
+
+      const storedRun = await runStore.read(result.run.id);
+      const storedThread = await threadStore.read(`thread_${result.run.id}`);
+      const graph = await executionGraphs.getGraph(result.run.id);
+
+      expect(storedRun?.run.state).toBe('completed');
+      expect(storedRun?.transcript?.entryCount).toBeGreaterThan(0);
+      expect(storedRun?.sessionSnapshot?.executionGraph?.nodeCount).toBeGreaterThan(0);
+      expect(storedThread?.state).toBe('completed');
+      expect(result.session.executionGraph?.receiptCount).toBeGreaterThan(0);
+      expect(graph?.nodes.map((node) => node.kind)).toEqual(
+        expect.arrayContaining(['actor', 'proposal', 'capability', 'side_effect_receipt', 'completion']),
+      );
+    });
+
+    it('routes workspace-state memory writes through governed mutation proposals', async () => {
+      const provider = mockProvider([
+        makeResponse(JSON.stringify({
+          type: 'memory_write',
+          writes: [
+            {
+              entry: {
+                tier: 'semantic',
+                kind: 'workspace_state',
+                content: 'Budget envelope updated to 5000 USD',
+                provenance: 'agent',
+                confidence: 0.92,
+                scope: 'agent',
+                ttlMs: 0,
+                tags: ['budget'],
+                stateRef: {
+                  resourceType: 'budget_envelope',
+                  resourceId: 'budget_main',
+                  authority: 'control_plane',
+                  version: '1',
+                },
+              },
+              overwriteStrategy: 'replace',
+            },
+          ],
+        })),
+        makeResponse('Updated workspace state'),
+      ]);
+
+      const workspaceStateProvider = {
+        getResources: vi.fn(async () => []),
+        getEvidence: vi.fn(async () => []),
+        proposeMutation: vi.fn(async () => ({
+          accepted: true,
+          snapshot: {
+            ref: {
+              resourceType: 'budget_envelope',
+              resourceId: 'budget_main',
+              authority: 'control_plane' as const,
+              version: '2',
+            },
+            summary: 'Budget envelope updated',
+            asOf: new Date().toISOString(),
+          },
+        })),
+      };
+
+      const runtime = new AgentRuntime(makeDefinition(), {
+        modelProviders: { mock: provider },
+        workspaceStateProvider,
+      });
+
+      await runtime.run('Update the workspace budget');
+
+      expect(workspaceStateProvider.proposeMutation).toHaveBeenCalledTimes(1);
+      const eventTypes = runtime.eventLog.getAll().map((event) => event.type);
+      expect(eventTypes).toContain('resource_mutation_proposed');
+      expect(eventTypes).toContain('resource_mutation_committed');
+    });
+
     it('preserves run metadata', async () => {
       const provider = mockProvider([makeResponse('done')]);
       const runtime = new AgentRuntime(makeDefinition(), {

@@ -4,15 +4,60 @@
  * @description
  * Memory tier types and store interfaces for the Veridex Agent Fabric.
  *
- * The framework supports four memory classes: working, episodic,
- * semantic, and procedural. Memory writes carry provenance,
- * confidence, TTL, and scope metadata.
+ * The framework supports four memory tiers: working, episodic,
+ * semantic, and procedural. Entries may also reference governed
+ * workspace state, derived summaries, and evidence bundles without
+ * forcing the runtime itself to become the system of record.
  */
 
 // ── Memory Tiers ──
 
 /** The four memory tier classes. */
 export type MemoryTier = 'working' | 'episodic' | 'semantic' | 'procedural';
+
+/** Logical classification for a memory entry. */
+export type MemoryEntryKind = 'note' | 'workspace_state' | 'derived_memory' | 'evidence';
+
+/** Authority for a referenced state object. */
+export type MemoryStateAuthority = 'runtime' | 'control_plane' | 'external';
+
+/** Reference to an authoritative workspace object outside the runtime. */
+export interface MemoryStateReference {
+  /** Resource namespace or bounded context */
+  namespace?: string;
+  /** Resource type (task, deployment, incident, etc.) */
+  resourceType: string;
+  /** Stable identifier for the authoritative object */
+  resourceId: string;
+  /** Owning authority for the object */
+  authority: MemoryStateAuthority;
+  /** Optional version or revision identifier */
+  version?: string;
+}
+
+/** Reference to evidence captured for audit or replay. */
+export interface MemoryEvidenceReference {
+  /** Trace identifier */
+  traceId?: string;
+  /** Transcript entry identifier */
+  transcriptEntryId?: string;
+  /** Audit bundle or evidence package identifier */
+  bundleId?: string;
+  /** External URI if the evidence is stored out-of-process */
+  uri?: string;
+  /** Optional digest for integrity verification */
+  hash?: string;
+}
+
+/** Metadata about how a derived memory entry was produced. */
+export interface MemoryDerivation {
+  /** Derivation strategy used to produce the entry */
+  strategy: 'summary' | 'extraction' | 'classification' | 'aggregation' | 'custom';
+  /** Source entry identifiers used to derive this record */
+  sourceEntryIds?: string[];
+  /** Source resource identifiers used to derive this record */
+  sourceResourceIds?: string[];
+}
 
 // ── Memory Entry ──
 
@@ -22,6 +67,8 @@ export interface MemoryEntry {
   id: string;
   /** Memory tier this entry belongs to */
   tier: MemoryTier;
+  /** Logical classification for retrieval and governance */
+  kind?: MemoryEntryKind;
   /** The memory content */
   content: string;
   /** Source of this memory (tool, model, user, system) */
@@ -40,12 +87,18 @@ export interface MemoryEntry {
   tags: string[];
   /** Embedding vector (for semantic search, optional) */
   embedding?: number[];
+  /** Reference to an authoritative state object if this is not the source of truth */
+  stateRef?: MemoryStateReference;
+  /** Reference to supporting evidence for this memory */
+  evidenceRef?: MemoryEvidenceReference;
+  /** Derivation metadata for summaries and extracted memories */
+  derivation?: MemoryDerivation;
   /** Additional metadata */
   metadata?: Record<string, unknown>;
 }
 
 /** Source of a memory entry. */
-export type MemoryProvenance = 'tool' | 'model' | 'user' | 'system' | 'import';
+export type MemoryProvenance = 'agent' | 'tool' | 'model' | 'user' | 'system' | 'import' | 'control_plane';
 
 /** Scope of a memory entry. */
 export type MemoryScope = 'turn' | 'run' | 'agent' | 'global';
@@ -70,10 +123,16 @@ export interface MemoryWriteRequest {
 export interface MemoryQuery {
   /** Filter by tier */
   tier?: MemoryTier;
+  /** Filter by logical entry kind */
+  kind?: MemoryEntryKind;
   /** Filter by scope */
   scope?: MemoryScope;
   /** Filter by tags (any match) */
   tags?: string[];
+  /** Filter by referenced state resource type */
+  resourceType?: string;
+  /** Filter by referenced state resource ID */
+  resourceId?: string;
   /** Text search query */
   text?: string;
   /** Maximum number of results */

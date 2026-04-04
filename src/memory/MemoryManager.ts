@@ -14,6 +14,7 @@ import type {
   MemoryConfig,
   MemoryScope,
   MemoryTier,
+  MemoryEntryKind,
 } from '../types/memory';
 import { InMemoryStore } from './InMemoryStore';
 
@@ -45,6 +46,11 @@ export class MemoryManager {
     return this.store.search(query);
   }
 
+  /** Search memory by logical classification. */
+  async searchByKind(kind: MemoryEntryKind, query: Omit<MemoryQuery, 'kind'> = {}): Promise<MemoryEntry[]> {
+    return this.store.search({ ...query, kind });
+  }
+
   /** Delete a memory entry. */
   async delete(id: string): Promise<boolean> {
     return this.store.delete(id);
@@ -71,6 +77,30 @@ export class MemoryManager {
   /** Get procedural memory (learned procedures). */
   async getProceduralMemory(tags?: string[]): Promise<MemoryEntry[]> {
     return this.store.search({ tier: 'procedural', tags });
+  }
+
+  /** Get references to authoritative workspace state. */
+  async getWorkspaceState(options?: {
+    resourceType?: string;
+    resourceId?: string;
+    limit?: number;
+  }): Promise<MemoryEntry[]> {
+    return this.store.search({
+      kind: 'workspace_state',
+      resourceType: options?.resourceType,
+      resourceId: options?.resourceId,
+      limit: options?.limit,
+    });
+  }
+
+  /** Get derived summaries or extracted memories. */
+  async getDerivedMemory(limit?: number): Promise<MemoryEntry[]> {
+    return this.store.search({ kind: 'derived_memory', limit });
+  }
+
+  /** Get evidence-linked memory entries. */
+  async getEvidenceEntries(limit?: number): Promise<MemoryEntry[]> {
+    return this.store.search({ kind: 'evidence', limit });
   }
 
   /** Compact memory across all tiers. */

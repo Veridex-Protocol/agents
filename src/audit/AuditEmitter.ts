@@ -7,6 +7,7 @@
 import type { TraceEvent } from '../types/events';
 import type { PolicyDecision } from '../types/policy';
 import type { ModelUsage } from '../types/models';
+import type { ToolExecutionOutcome } from '../types/accountability';
 import type { ApprovalDecision } from '../approvals/ApprovalManager';
 
 // ── Audit Types ──
@@ -54,6 +55,7 @@ export interface ToolExecutionSummary {
   toolName: string;
   turnIndex: number;
   success: boolean;
+  outcome?: ToolExecutionOutcome;
   durationMs: number;
   error?: string;
   costUSD?: number;

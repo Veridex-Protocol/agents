@@ -48,6 +48,10 @@ export class InMemoryStore implements MemoryStore {
             case 'merge':
               existing.confidence = Math.max(existing.confidence, partial.confidence);
               existing.tags = [...new Set([...existing.tags, ...partial.tags])];
+              existing.kind = partial.kind ?? existing.kind;
+              existing.stateRef = partial.stateRef ?? existing.stateRef;
+              existing.evidenceRef = partial.evidenceRef ?? existing.evidenceRef;
+              existing.derivation = partial.derivation ?? existing.derivation;
               existing.lastAccessedAt = Date.now();
               return { ...existing };
             case 'append':
@@ -80,8 +84,15 @@ export class InMemoryStore implements MemoryStore {
       // Filter by tier
       if (query.tier && entry.tier !== query.tier) continue;
 
+      // Filter by kind
+      if (query.kind && entry.kind !== query.kind) continue;
+
       // Filter by scope
       if (query.scope && entry.scope !== query.scope) continue;
+
+      // Filter by referenced workspace resource
+      if (query.resourceType && entry.stateRef?.resourceType !== query.resourceType) continue;
+      if (query.resourceId && entry.stateRef?.resourceId !== query.resourceId) continue;
 
       // Filter by min confidence
       if (query.minConfidence !== undefined && entry.confidence < query.minConfidence) continue;
