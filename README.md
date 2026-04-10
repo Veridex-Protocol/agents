@@ -140,6 +140,25 @@ This design is intentional: it keeps state explicit and inspectable instead of h
 - `CheckpointManager`
 - `InMemoryCheckpointStore`
 
+### Persistent Stores (Postgres)
+
+- `createPostgresStores` — factory that creates all six stores from a single connection
+- `PostgresRunStore`, `PostgresThreadStore`, `PostgresExecutionGraphStore`
+- `PostgresMemoryStore`, `PostgresTranscriptStore`, `PostgresCheckpointStore`
+
+### Streaming
+
+- `streamRun()` — AsyncGenerator on `AgentRuntime` that yields `TraceEvent`s including `token_streamed`
+- `eventToSSE` — serialize a `TraceEvent` to Server-Sent Events format
+- `streamToSSE` — convert an `AsyncIterable<TraceEvent>` to a `ReadableStream<string>` for HTTP responses
+- `streamTokens` — filter an event stream to only token text strings
+
+### Built-in Tools
+
+- `PlanningTools` — `write_todo` and `list_todos` for agent-driven task tracking
+- `FilesystemTools` — sandboxed `file_read`, `file_write`, `file_edit`, `file_search`, `file_glob`
+- `SubagentTools` — `delegate_task` for spawning child agent runs
+
 ### Governance and audit
 
 - `PolicyEngine`
@@ -260,6 +279,121 @@ The runtime can collaborate with other agent ecosystems through:
 
 If you need higher-level migration or live bridges into specific external frameworks, use `@veridex/agents-adapters` or `@veridex/agents-openclaw`.
 
+## Persistent Stores (Postgres)
+
+By default, all stores are in-memory. For production use, wire up Postgres-backed stores:
+
+```ts
+import { createAgent, createPostgresStores, OpenAIProvider } from '@veridex/agents';
+import pg from 'pg';
+
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const stores = createPostgresStores({
+  executor: {
+    query: (sql, params) => pool.query(sql, params),
+  },
+  // tablePrefix: 'veridex_agent_', // default
+});
+
+const agent = createAgent(
+  { id: 'my-agent', name: 'My Agent', model: { provider: 'openai', model: 'gpt-4o-mini' }, instructions: '...' },
+  {
+    modelProviders: { openai: new OpenAIProvider({ apiKey: process.env.OPENAI_API_KEY }) },
+    ...stores,
+  },
+);
+```
+
+Tables are auto-created on first use. The `PostgresQueryExecutor` interface is compatible with `pg`, `postgres.js`, and Drizzle.
+
+## Streaming
+
+The runtime supports token-level streaming via `streamRun()`:
+
+```ts
+// Stream all trace events (including token_streamed)
+for await (const event of agent.streamRun('Tell me about agent safety')) {
+  if (event.type === 'token_streamed') {
+    process.stdout.write(event.data.token);
+  }
+}
+```
+
+For HTTP/SSE endpoints:
+
+```ts
+import { streamToSSE } from '@veridex/agents';
+
+app.get('/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  const events = agent.streamRun(req.query.input as string);
+  const sseStream = streamToSSE(events);
+  sseStream.pipeTo(new WritableStream({
+    write(chunk) { res.write(chunk); },
+    close() { res.end(); },
+  }));
+});
+```
+
+## Approval Handlers
+
+Register custom approval handlers for `human_required`, `dual_approval`, or `policy_pack` modes:
+
+```ts
+const agent = createAgent(
+  {
+    id: 'ops-agent',
+    name: 'Ops Agent',
+    model: { provider: 'openai', model: 'gpt-4o' },
+    instructions: 'Handle operations carefully.',
+    policies: [{ type: 'requireApprovalFor', params: { safetyClasses: ['write'] } }],
+  },
+  {
+    modelProviders: { openai: new OpenAIProvider({ apiKey: process.env.OPENAI_API_KEY }) },
+    approvalRoutes: [
+      { match: (_proposal, policy) => policy.riskScore >= 80, mode: 'human_required' },
+    ],
+    approvalHandlers: {
+      human_required: async (request) => {
+        // Post to Slack, send webhook, wait for response, etc.
+        const decision = await notifySlackAndWait(request);
+        return {
+          requestId: request.id,
+          approved: decision.approved,
+          decidedBy: decision.user,
+          decidedAt: Date.now(),
+        };
+      },
+    },
+  },
+);
+```
+
+When a handler is registered, it runs synchronously during the approval flow. Without a handler, the run suspends in `waiting_for_approval` state and can be resumed manually via `resumeFromCheckpoint`.
+
+## Built-in Tools
+
+The runtime ships with production-ready built-in tool sets:
+
+```ts
+import { createAgent, PlanningTools, FilesystemTools, SubagentTools } from '@veridex/agents';
+
+const agent = createAgent(
+  {
+    id: 'dev-agent',
+    name: 'Developer Agent',
+    model: { provider: 'openai', model: 'gpt-4o' },
+    instructions: 'Help with coding tasks.',
+    tools: [
+      ...PlanningTools(),
+      ...FilesystemTools({ rootDir: '/workspace' }),
+      ...SubagentTools({ spawnRun: async (def, input) => ({ output: '...' }) }),
+    ],
+  },
+  { modelProviders: { openai: new OpenAIProvider({ apiKey: process.env.OPENAI_API_KEY }) } },
+);
+```
+
 ## Testing and Regression
 
 The package includes testing helpers so runtime behavior can be replayed and compared:
@@ -291,5 +425,6 @@ Use them when you want:
 - Some interop and transport surfaces are broader than their current example coverage.
 - Payments and trust flows depend on the lower-layer SDKs being configured correctly.
 - You should still test your own tool failure, retry, and approval behavior explicitly before production rollout.
+- Postgres stores auto-create tables but do not yet run migrations for schema changes between versions.
 
 Contributions are welcome, especially around examples, runtime ergonomics, transport hardening, and documentation improvements.

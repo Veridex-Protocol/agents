@@ -12,7 +12,14 @@ import type {
   MemoryScenario,
   SecurityScenario,
   HandoffScenario,
+  EvalSplit,
 } from './types';
+
+/** Common overrides for split/stratum assignment on any scenario factory. */
+export interface ScenarioOverrides {
+  split?: EvalSplit;
+  stratum?: string;
+}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Policy Scenarios
@@ -22,7 +29,7 @@ import type {
  * Scenario where a tool call proposal should pass with no rules registered.
  */
 export function policyPassthroughScenario(
-  overrides?: Partial<PolicyScenario>,
+  overrides?: ScenarioOverrides & Partial<PolicyScenario>,
 ): PolicyScenario {
   return {
     id: 'policy-passthrough',
@@ -43,7 +50,7 @@ export function policyPassthroughScenario(
 /**
  * Scenario testing final-answer proposal passes through empty engine.
  */
-export function policyFinalAnswerPassScenario(): PolicyScenario {
+export function policyFinalAnswerPassScenario(overrides?: ScenarioOverrides): PolicyScenario {
   return {
     id: 'policy-final-answer-pass',
     name: 'Final answer passes empty engine',
@@ -53,6 +60,7 @@ export function policyFinalAnswerPassScenario(): PolicyScenario {
     proposal: { type: 'final_answer', answer: 'Done.' },
     context: {},
     expected: { verdict: 'pass' },
+    ...overrides,
   };
 }
 
@@ -63,7 +71,7 @@ export function policyFinalAnswerPassScenario(): PolicyScenario {
 /**
  * Scenario where all sections fit within budget.
  */
-export function contextNoBudgetPressureScenario(): ContextScenario {
+export function contextNoBudgetPressureScenario(overrides?: ScenarioOverrides): ContextScenario {
   return {
     id: 'context-no-pressure',
     name: 'All sections fit within budget',
@@ -81,13 +89,14 @@ export function contextNoBudgetPressureScenario(): ContextScenario {
       includedSources: ['system', 'instructions', 'memory'],
       ordered: true,
     },
+    ...overrides,
   };
 }
 
 /**
  * Scenario where tight budget forces truncation of lower-priority sections.
  */
-export function contextTruncationScenario(): ContextScenario {
+export function contextTruncationScenario(overrides?: ScenarioOverrides): ContextScenario {
   const longContent = 'x'.repeat(400); // ~100 tokens at 4 chars/token
   return {
     id: 'context-truncation',
@@ -107,13 +116,14 @@ export function contextTruncationScenario(): ContextScenario {
       excludedSources: [],
       ordered: true,
     },
+    ...overrides,
   };
 }
 
 /**
  * Scenario testing priority ordering: high-priority sources appear first.
  */
-export function contextPriorityOrderingScenario(): ContextScenario {
+export function contextPriorityOrderingScenario(overrides?: ScenarioOverrides): ContextScenario {
   return {
     id: 'context-priority-ordering',
     name: 'High-priority sections ordered first',
@@ -131,6 +141,7 @@ export function contextPriorityOrderingScenario(): ContextScenario {
       includedSources: ['system', 'instructions', 'custom'],
       ordered: true,
     },
+    ...overrides,
   };
 }
 
@@ -141,7 +152,7 @@ export function contextPriorityOrderingScenario(): ContextScenario {
 /**
  * Scenario: all calls succeed, circuit stays closed.
  */
-export function circuitBreakerStaysClosedScenario(): TransportScenario {
+export function circuitBreakerStaysClosedScenario(overrides?: ScenarioOverrides): TransportScenario {
   return {
     id: 'transport-stays-closed',
     name: 'All success → circuit stays closed',
@@ -159,13 +170,14 @@ export function circuitBreakerStaysClosedScenario(): TransportScenario {
       circuitState: 'closed',
       totalAttempts: 3,
     },
+    ...overrides,
   };
 }
 
 /**
  * Scenario: enough failures to trip the breaker open.
  */
-export function circuitBreakerOpensScenario(): TransportScenario {
+export function circuitBreakerOpensScenario(overrides?: ScenarioOverrides): TransportScenario {
   return {
     id: 'transport-opens',
     name: 'Consecutive failures → circuit opens',
@@ -184,13 +196,14 @@ export function circuitBreakerOpensScenario(): TransportScenario {
       circuitState: 'open',
       totalAttempts: 3, // Only 3 attempted, 4th rejected by open circuit
     },
+    ...overrides,
   };
 }
 
 /**
  * Scenario: success resets failure count, preventing trip.
  */
-export function circuitBreakerResetOnSuccessScenario(): TransportScenario {
+export function circuitBreakerResetOnSuccessScenario(overrides?: ScenarioOverrides): TransportScenario {
   return {
     id: 'transport-reset-on-success',
     name: 'Success resets failure count',
@@ -210,6 +223,7 @@ export function circuitBreakerResetOnSuccessScenario(): TransportScenario {
       circuitState: 'closed',
       totalAttempts: 5,
     },
+    ...overrides,
   };
 }
 
@@ -220,7 +234,7 @@ export function circuitBreakerResetOnSuccessScenario(): TransportScenario {
 /**
  * Scenario: write and search memory entries.
  */
-export function memoryWriteSearchScenario(): MemoryScenario {
+export function memoryWriteSearchScenario(overrides?: ScenarioOverrides): MemoryScenario {
   return {
     id: 'memory-write-search',
     name: 'Write entries and search',
@@ -237,13 +251,14 @@ export function memoryWriteSearchScenario(): MemoryScenario {
       { type: 'read', tag: 'ops', expectedCount: 2 },
     ],
     expected: { totalEntries: 3 },
+    ...overrides,
   };
 }
 
 /**
  * Scenario: empty memory with no seed entries.
  */
-export function memoryEmptyBaselineScenario(): MemoryScenario {
+export function memoryEmptyBaselineScenario(overrides?: ScenarioOverrides): MemoryScenario {
   return {
     id: 'memory-empty-baseline',
     name: 'Empty memory returns zero results',
@@ -255,6 +270,7 @@ export function memoryEmptyBaselineScenario(): MemoryScenario {
       { type: 'search', query: 'anything', expectedMinResults: 0, expectedMaxResults: 0 },
     ],
     expected: { totalEntries: 0 },
+    ...overrides,
   };
 }
 
@@ -265,7 +281,7 @@ export function memoryEmptyBaselineScenario(): MemoryScenario {
 /**
  * Scenario: injection detection catches imperative override.
  */
-export function injectionDetectionScenario(): SecurityScenario {
+export function injectionDetectionScenario(overrides?: ScenarioOverrides): SecurityScenario {
   return {
     id: 'security-injection-imperative',
     name: 'Injection detection: imperative override',
@@ -285,13 +301,14 @@ export function injectionDetectionScenario(): SecurityScenario {
       verdict: 'block',
       triggerReasons: ['injection'],
     },
+    ...overrides,
   };
 }
 
 /**
  * Scenario: clean proposal passes injection detection.
  */
-export function injectionCleanPassScenario(): SecurityScenario {
+export function injectionCleanPassScenario(overrides?: ScenarioOverrides): SecurityScenario {
   return {
     id: 'security-injection-clean',
     name: 'Injection detection: clean proposal passes',
@@ -310,13 +327,14 @@ export function injectionCleanPassScenario(): SecurityScenario {
       shouldBlock: false,
       verdict: 'pass',
     },
+    ...overrides,
   };
 }
 
 /**
  * Scenario: budget ceiling blocks over-spend.
  */
-export function budgetCeilingBlockScenario(): SecurityScenario {
+export function budgetCeilingBlockScenario(overrides?: ScenarioOverrides): SecurityScenario {
   return {
     id: 'security-budget-ceiling',
     name: 'Budget ceiling blocks over-spend',
@@ -335,6 +353,7 @@ export function budgetCeilingBlockScenario(): SecurityScenario {
       shouldBlock: false, // Budget packs need context, proposal alone won't trigger
       verdict: 'pass',
     },
+    ...overrides,
   };
 }
 
@@ -345,7 +364,7 @@ export function budgetCeilingBlockScenario(): SecurityScenario {
 /**
  * Scenario: handoff allowed — no restrictions configured.
  */
-export function handoffAllowedScenario(): HandoffScenario {
+export function handoffAllowedScenario(overrides?: ScenarioOverrides): HandoffScenario {
   return {
     id: 'handoff-allowed-open',
     name: 'Handoff with no restrictions passes',
@@ -359,13 +378,14 @@ export function handoffAllowedScenario(): HandoffScenario {
       allowed: true,
       verdict: 'pass',
     },
+    ...overrides,
   };
 }
 
 /**
  * Scenario: handoff blocked by blocklist.
  */
-export function handoffBlockedScenario(): HandoffScenario {
+export function handoffBlockedScenario(overrides?: ScenarioOverrides): HandoffScenario {
   return {
     id: 'handoff-blocked',
     name: 'Handoff blocked by blocklist',
@@ -382,13 +402,14 @@ export function handoffBlockedScenario(): HandoffScenario {
       allowed: false,
       verdict: 'block',
     },
+    ...overrides,
   };
 }
 
 /**
  * Scenario: handoff allowed because target is on allowlist.
  */
-export function handoffAllowlistScenario(): HandoffScenario {
+export function handoffAllowlistScenario(overrides?: ScenarioOverrides): HandoffScenario {
   return {
     id: 'handoff-allowlist',
     name: 'Handoff allowed by allowlist',
@@ -405,6 +426,7 @@ export function handoffAllowlistScenario(): HandoffScenario {
       allowed: true,
       verdict: 'pass',
     },
+    ...overrides,
   };
 }
 

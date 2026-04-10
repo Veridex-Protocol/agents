@@ -93,7 +93,7 @@ import { buildRuntimeBootstrapReport } from './bootstrap';
 import type { CheckpointStore } from '../checkpoints/CheckpointManager';
 import type { MemoryStore } from '../types/memory';
 import type { PolicyRule, PolicyDecision } from '../policy';
-import type { ApprovalRoute, ApprovalDecision } from '../approvals';
+import type { ApprovalRoute, ApprovalDecision, ApprovalHandler, ApprovalMode } from '../approvals';
 import type { AuditSink, ToolExecutionSummary } from '../audit';
 import type { HookPhase } from '../types/hooks';
 import type { HookRunResult } from '../hooks/HookRunner';
@@ -282,6 +282,13 @@ export class AgentRuntime {
     if (options?.approvalRoutes) {
       for (const route of options.approvalRoutes as ApprovalRoute[]) {
         this.approvals.addRoute(route);
+      }
+    }
+
+    // Register approval handlers from options
+    if (options?.approvalHandlers) {
+      for (const [mode, handler] of Object.entries(options.approvalHandlers)) {
+        this.approvals.registerHandler(mode as ApprovalMode, handler as ApprovalHandler);
       }
     }
 
@@ -809,6 +816,61 @@ export class AgentRuntime {
     return this.executeRunLoop(run, 0);
   }
 
+  /**
+   * Execute an agent run and stream all events as they occur.
+   *
+   * Returns an AsyncGenerator that yields TraceEvent objects, including
+   * `token_streamed` events for real-time token output. The final yield
+   * is always a `run_completed` or `run_failed` event.
+   *
+   * ```ts
+   * for await (const event of runtime.streamRun('Hello!')) {
+   *   if (event.type === 'token_streamed') process.stdout.write(event.data.token);
+   *   if (event.type === 'run_completed') console.log('Done:', event.data.output);
+   * }
+   * ```
+   */
+  async *streamRun(
+    input: string,
+    metadata?: Record<string, unknown>,
+  ): AsyncGenerator<TraceEvent, void, undefined> {
+    // Buffer for events emitted during the run
+    const buffer: TraceEvent[] = [];
+    let resolve: (() => void) | null = null;
+    let done = false;
+
+    const listener = (event: TraceEvent) => {
+      buffer.push(event);
+      if (resolve) {
+        resolve();
+        resolve = null;
+      }
+    };
+
+    // Subscribe to all events
+    const unsubscribe = this.events.onAny(listener);
+
+    // Start the run (non-blocking)
+    const runPromise = this.run(input, metadata).then(
+      () => { done = true; if (resolve) { resolve(); resolve = null; } },
+      () => { done = true; if (resolve) { resolve(); resolve = null; } },
+    );
+
+    try {
+      while (!done || buffer.length > 0) {
+        if (buffer.length > 0) {
+          yield buffer.shift()!;
+        } else if (!done) {
+          // Wait for next event
+          await new Promise<void>((r) => { resolve = r; });
+        }
+      }
+    } finally {
+      unsubscribe();
+      await runPromise;
+    }
+  }
+
   /** Continue executing a run from the given turn index. */
   private async executeRunLoop(
     run: Run,
@@ -1008,10 +1070,26 @@ export class AgentRuntime {
     });
 
     // Call model
+    let tokenIndex = 0;
+    const onToken = this.enableTracing
+      ? (token: string) => {
+          this.emitEvent({
+            id: eventId(),
+            type: 'token_streamed',
+            runId: run.id,
+            agentId: this.definition.id,
+            turnIndex,
+            timestamp: Date.now(),
+            data: { token, tokenIndex: tokenIndex++ },
+          });
+        }
+      : undefined;
+
     const response = await provider.complete(messages, {
       temperature: this.definition.model.temperature,
       maxOutputTokens: this.definition.model.maxOutputTokens,
       tools: toolDefs.length > 0 ? toolDefs : undefined,
+      onToken,
     });
 
     this.emitEvent({

@@ -14,6 +14,9 @@ export type ScenarioStatus = 'pending' | 'passed' | 'failed' | 'errored' | 'skip
 
 // ── Base Scenario ──
 
+/** Data split for train/holdout/scorecard partitioning. */
+export type EvalSplit = 'train' | 'holdout' | 'scorecard';
+
 export interface BaseScenario {
   /** Unique scenario identifier */
   id: string;
@@ -27,6 +30,10 @@ export interface BaseScenario {
   tags?: string[];
   /** Timeout in ms (default 5000) */
   timeoutMs?: number;
+  /** Data split for optimization loops (train visible to proposer, holdout private) */
+  split?: EvalSplit;
+  /** Stratum tag for balanced train/holdout partitioning (e.g. 'tool_selection', 'policy') */
+  stratum?: string;
 }
 
 export type ScenarioCategory =
@@ -229,6 +236,8 @@ export interface ScenarioResult {
   error?: string;
   /** Stack trace if errored */
   stack?: string;
+  /** Trace envelope ID or URL linking to the agent trace for this scenario run */
+  traceRef?: string;
 }
 
 export interface AssertionResult {
@@ -267,4 +276,62 @@ export interface EvalSuiteResult {
   durationMs: number;
   /** Timestamp */
   completedAt: number;
+  /** Per-split summaries (populated when scenarios have split assignments) */
+  splitResults?: Record<EvalSplit, SplitResult>;
+}
+
+// ── Split-Aware Result Types ──
+
+/** Per-case outcome within a split, enriching ScenarioResult with split/stratum context. */
+export interface CaseOutcome {
+  /** Scenario ID */
+  caseId: string;
+  /** Split this case belongs to */
+  split: EvalSplit;
+  /** Stratum tag (e.g. 'tool_selection', 'policy') */
+  stratum: string;
+  /** Pass/fail/error status */
+  status: ScenarioStatus;
+  /** Score (1.0 = passed, 0.0 = failed) */
+  score: number;
+  /** Failure message if failed or errored */
+  failureMessage?: string;
+  /** Trace envelope ID or URL */
+  traceRef?: string;
+  /** Full scenario result */
+  scenarioResult: ScenarioResult;
+}
+
+/** Aggregated result for a single data split. */
+export interface SplitResult {
+  /** Which split */
+  split: EvalSplit;
+  /** Variant label that produced this result */
+  variant: string;
+  /** Cases that passed */
+  passed: number;
+  /** Total cases in this split */
+  total: number;
+  /** Per-case outcomes */
+  outcomes: CaseOutcome[];
+  /** Convenience: passed / total */
+  correctness: number;
+  /** Cases that failed (status !== 'passed') */
+  failingOutcomes: CaseOutcome[];
+}
+
+/** Strata balance validation result. */
+export interface StrataValidation {
+  /** Whether train and holdout have identical strata sets */
+  balanced: boolean;
+  /** Strata present in train */
+  trainStrata: string[];
+  /** Strata present in holdout */
+  holdoutStrata: string[];
+  /** Strata missing from holdout */
+  missingFromHoldout: string[];
+  /** Strata missing from train */
+  missingFromTrain: string[];
+  /** Warnings (non-fatal) */
+  warnings: string[];
 }

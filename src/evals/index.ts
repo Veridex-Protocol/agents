@@ -24,10 +24,22 @@ export type {
   ScenarioResult,
   AssertionResult,
   EvalSuiteResult,
+  EvalSplit,
+  CaseOutcome,
+  SplitResult,
+  StrataValidation,
 } from './types';
 
 // Runner
-export { runScenario, runEvalSuite, runPolicyScenarioWithRules } from './runner';
+export {
+  runScenario,
+  runEvalSuite,
+  runPolicyScenarioWithRules,
+  runSplit,
+  validateSplitBalance,
+  toCaseOutcome,
+  buildSplitResult,
+} from './runner';
 
 // Built-in scenarios
 export {
@@ -49,3 +61,29 @@ export {
   handoffAllowlistScenario,
   allBuiltInScenarios,
 } from './scenarios';
+export type { ScenarioOverrides } from './scenarios';
+
+// Surfaces
+export type {
+  HarnessSurfaceKind,
+  HarnessSurface,
+  HarnessVariant,
+  VariantDiff,
+} from './surfaces';
+export {
+  extractSurfaces,
+  buildVariant,
+  buildVariantFromDef,
+  applyVariant,
+  diffVariants,
+} from './surfaces';
+
+// Experiment
+export type {
+  AcceptanceCriteria,
+  ExperimentConfig,
+  IterationDiagnosis,
+  IterationRecord,
+  ExperimentReport,
+} from './experiment';
+export { runExperiment } from './experiment';

@@ -157,6 +157,8 @@ export interface RuntimeOptions {
   policyRules?: unknown[];
   /** Approval routes to register */
   approvalRoutes?: unknown[];
+  /** Approval handlers keyed by approval mode */
+  approvalHandlers?: Record<string, (request: unknown) => Promise<unknown>>;
   /** Audit sinks to register */
   auditSinks?: unknown[];
   /** Additional execution capabilities imported from adapters or remote transports */

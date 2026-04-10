@@ -175,7 +175,8 @@ export class ApprovalManager {
     const shouldAutoResolve =
       options?.autoResolve !== false ||
       mode === 'auto_allow' ||
-      mode === 'auto_block';
+      mode === 'auto_block' ||
+      this.handlers.has(mode);
 
     if (!shouldAutoResolve) {
       return { request };

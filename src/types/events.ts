@@ -21,6 +21,7 @@ export type TraceEventType =
   | 'context_compiled'
   | 'model_call_started'
   | 'model_call_completed'
+  | 'token_streamed'
   | 'proposal_created'
   | 'proposal_validated'
   | 'tool_proposed'
@@ -216,6 +217,11 @@ export interface ErrorOccurredEvent extends BaseTraceEvent {
   data: { error: string; phase: string; recoverable: boolean };
 }
 
+export interface TokenStreamedEvent extends BaseTraceEvent {
+  type: 'token_streamed';
+  data: { token: string; tokenIndex: number };
+}
+
 // ── Discriminated Union ──
 
 /** Discriminated union of all trace event types. */
@@ -225,6 +231,7 @@ export type TraceEvent =
   | ContextCompiledEvent
   | ModelCallStartedEvent
   | ModelCallCompletedEvent
+  | TokenStreamedEvent
   | ProposalCreatedEvent
   | ProposalValidatedEvent
   | ToolProposedEvent

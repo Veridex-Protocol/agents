@@ -124,6 +124,7 @@ export type {
   TraceEventType,
   TraceEvent,
   BootstrapReportGeneratedEvent,
+  TokenStreamedEvent,
   // Models
   ModelConfig,
   ModelProvider,
@@ -197,6 +198,12 @@ export type { ToolExecutionResult } from './tools/ToolExecutor';
 export { ToolValidator } from './tools/ToolValidator';
 export { tool } from './tools/tool';
 export type { ToolOptions } from './tools/tool';
+export { createPlanningTools } from './tools/PlanningTools';
+export type { PlanningToolsOptions, TodoEntry } from './tools/PlanningTools';
+export { createFilesystemTools } from './tools/FilesystemTools';
+export type { FilesystemToolsOptions } from './tools/FilesystemTools';
+export { createSubagentTools } from './tools/SubagentTools';
+export type { SubagentToolsOptions, SubagentEntry, SubagentExecutor } from './tools/SubagentTools';
 export { ExecutionSurfaceRegistry } from './execution';
 
 // ── Hooks ──
@@ -224,6 +231,22 @@ export {
 // ── Checkpoints ──
 export { CheckpointManager, InMemoryCheckpointStore } from './checkpoints/CheckpointManager';
 export type { Checkpoint, CheckpointStore } from './checkpoints/CheckpointManager';
+
+// ── Postgres Stores ──
+export {
+  createPostgresStores,
+  PostgresRunStore,
+  PostgresThreadStore,
+  PostgresExecutionGraphStore,
+  PostgresMemoryStore,
+  PostgresTranscriptStore,
+  PostgresCheckpointStore,
+} from './stores';
+export type {
+  PostgresQueryExecutor,
+  PostgresStoreConfig,
+  PostgresStores,
+} from './stores';
 
 // ── Integrations ──
 export { CoreAdapter } from './integrations/CoreAdapter';
@@ -267,6 +290,9 @@ export type {
 // ── Testing ──
 export { ReplayProvider, TraceRecorder, compareTraces, serializeGoldenTrace, deserializeGoldenTrace } from './testing';
 export type { RecordedInteraction, GoldenTrace, TraceComparisonResult, EventDiff } from './testing';
+
+// ── Streaming ──
+export { eventToSSE, streamToSSE, streamTokens } from './streaming';
 
 // ── Transports ──
 export { MCPServerTransport, ACPTransport, A2ATransport } from './transports';
@@ -348,7 +374,15 @@ export type {
 } from './security';
 
 // ── Evals ──
-export { runScenario, runEvalSuite, runPolicyScenarioWithRules } from './evals';
+export {
+  runScenario,
+  runEvalSuite,
+  runPolicyScenarioWithRules,
+  runSplit,
+  validateSplitBalance,
+  toCaseOutcome,
+  buildSplitResult,
+} from './evals';
 export {
   policyPassthroughScenario,
   policyFinalAnswerPassScenario,
@@ -383,4 +417,34 @@ export type {
   ScenarioResult,
   AssertionResult,
   EvalSuiteResult,
+  EvalSplit,
+  CaseOutcome,
+  SplitResult,
+  StrataValidation,
+  ScenarioOverrides,
 } from './evals';
+
+// Surfaces
+export type {
+  HarnessSurfaceKind,
+  HarnessSurface,
+  HarnessVariant,
+  VariantDiff,
+} from './evals';
+export {
+  extractSurfaces,
+  buildVariant,
+  buildVariantFromDef,
+  applyVariant,
+  diffVariants,
+} from './evals';
+
+// Experiment
+export type {
+  AcceptanceCriteria,
+  ExperimentConfig,
+  IterationDiagnosis,
+  IterationRecord,
+  ExperimentReport,
+} from './evals';
+export { runExperiment } from './evals';

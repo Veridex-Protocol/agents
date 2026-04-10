@@ -17,6 +17,10 @@ import type {
   ScenarioStatus,
   AssertionResult,
   EvalSuiteResult,
+  EvalSplit,
+  SplitResult,
+  CaseOutcome,
+  StrataValidation,
 } from './types';
 import { PolicyEngine, type PolicyContext, type PolicyRule } from '../policy/PolicyEngine';
 import { ContextCompiler } from '../context/ContextCompiler';
@@ -451,6 +455,26 @@ export async function runEvalSuite(
   const skipped = results.filter((r) => r.status === 'skipped').length;
   const overallStatus = errored > 0 ? 'errored' : failed > 0 ? 'failed' : 'passed';
 
+  // Build per-split summaries if any scenarios have split assignments
+  const hasSplits = scenarios.some((s) => s.split != null);
+  let splitResults: Record<EvalSplit, SplitResult> | undefined;
+
+  if (hasSplits) {
+    const splitMap = new Map<EvalSplit, CaseOutcome[]>();
+    for (let i = 0; i < scenarios.length; i++) {
+      const scenario = scenarios[i];
+      const result = results[i];
+      const split = scenario.split ?? 'train';
+      if (!splitMap.has(split)) splitMap.set(split, []);
+      splitMap.get(split)!.push(toCaseOutcome(scenario, result));
+    }
+
+    splitResults = {} as Record<EvalSplit, SplitResult>;
+    for (const [split, outcomes] of splitMap) {
+      splitResults[split] = buildSplitResult(split, 'default', outcomes);
+    }
+  }
+
   return {
     suiteId,
     suiteName,
@@ -463,6 +487,7 @@ export async function runEvalSuite(
     results,
     durationMs: Date.now() - start,
     completedAt: Date.now(),
+    splitResults,
   };
 }
 
@@ -531,4 +556,91 @@ export async function runPolicyScenarioWithRules(
     durationMs: Date.now() - start,
     assertions,
   };
+}
+
+// ── Split-Aware Helpers ──
+
+/**
+ * Build a CaseOutcome from a scenario and its result.
+ */
+export function toCaseOutcome(scenario: EvalScenario, result: ScenarioResult): CaseOutcome {
+  return {
+    caseId: scenario.id,
+    split: scenario.split ?? 'train',
+    stratum: scenario.stratum ?? scenario.category,
+    status: result.status,
+    score: result.status === 'passed' ? 1.0 : 0.0,
+    failureMessage: result.error ?? (result.status === 'failed'
+      ? result.assertions.filter((a) => !a.passed).map((a) => `${a.label}: expected ${a.expected}, got ${a.actual}`).join('; ')
+      : undefined),
+    traceRef: result.traceRef,
+    scenarioResult: result,
+  };
+}
+
+/**
+ * Build a SplitResult from a set of case outcomes.
+ */
+export function buildSplitResult(split: EvalSplit, variant: string, outcomes: CaseOutcome[]): SplitResult {
+  const passed = outcomes.filter((o) => o.status === 'passed').length;
+  const total = outcomes.length;
+  return {
+    split,
+    variant,
+    passed,
+    total,
+    outcomes,
+    correctness: total > 0 ? passed / total : 1.0,
+    failingOutcomes: outcomes.filter((o) => o.status !== 'passed'),
+  };
+}
+
+/**
+ * Run scenarios for a specific split and produce a SplitResult.
+ */
+export async function runSplit(
+  scenarios: EvalScenario[],
+  split: EvalSplit,
+  variant: string = 'default',
+): Promise<SplitResult> {
+  const filtered = scenarios.filter((s) => s.split === split);
+  const outcomes: CaseOutcome[] = [];
+
+  for (const scenario of filtered) {
+    const result = await executeScenario(scenario);
+    outcomes.push(toCaseOutcome(scenario, result));
+  }
+
+  return buildSplitResult(split, variant, outcomes);
+}
+
+/**
+ * Validate that train and holdout splits have matching strata sets.
+ * Returns warnings (not errors) for imbalanced splits.
+ */
+export function validateSplitBalance(scenarios: EvalScenario[]): StrataValidation {
+  const trainStrata = new Set<string>();
+  const holdoutStrata = new Set<string>();
+
+  for (const s of scenarios) {
+    const stratum = s.stratum ?? s.category;
+    if (s.split === 'train') trainStrata.add(stratum);
+    else if (s.split === 'holdout') holdoutStrata.add(stratum);
+  }
+
+  const trainArr = [...trainStrata].sort();
+  const holdoutArr = [...holdoutStrata].sort();
+  const missingFromHoldout = trainArr.filter((s) => !holdoutStrata.has(s));
+  const missingFromTrain = holdoutArr.filter((s) => !trainStrata.has(s));
+  const balanced = missingFromHoldout.length === 0 && missingFromTrain.length === 0;
+
+  const warnings: string[] = [];
+  if (missingFromHoldout.length > 0) {
+    warnings.push(`Strata in train but not holdout: ${missingFromHoldout.join(', ')}. Holdout cannot measure generalization for these categories.`);
+  }
+  if (missingFromTrain.length > 0) {
+    warnings.push(`Strata in holdout but not train: ${missingFromTrain.join(', ')}. These holdout cases have no corresponding train signal.`);
+  }
+
+  return { balanced, trainStrata: trainArr, holdoutStrata: holdoutArr, missingFromHoldout, missingFromTrain, warnings };
 }
