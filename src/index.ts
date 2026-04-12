@@ -37,6 +37,10 @@ export { AgentRuntime } from './runtime/AgentRuntime';
 export { createAgent } from './runtime/createAgent';
 export { buildRuntimeBootstrapReport } from './runtime/bootstrap';
 
+// ── Agent Registry Bridge ──
+export { AgentRegistryBridge } from './registry/AgentRegistryBridge';
+export type { AgentRegistryConfig, RegistryAgentRecord } from './registry/AgentRegistryBridge';
+
 // ── Types ──
 export type {
   // Agent
@@ -195,6 +199,20 @@ export type { OpenAIProviderConfig } from './models/OpenAIProvider';
 export { AnthropicProvider } from './models/AnthropicProvider';
 export type { AnthropicProviderConfig } from './models/AnthropicProvider';
 export { ModelRegistry } from './models/ModelRegistry';
+export { OpenAICompatibleProvider } from './models/OpenAICompatibleProvider';
+export type { OpenAICompatibleConfig } from './models/OpenAICompatibleProvider';
+export { XAIProvider } from './models/XAIProvider';
+export type { XAIProviderConfig } from './models/XAIProvider';
+export { DeepSeekProvider } from './models/DeepSeekProvider';
+export type { DeepSeekProviderConfig } from './models/DeepSeekProvider';
+export { ZhipuProvider } from './models/ZhipuProvider';
+export type { ZhipuProviderConfig } from './models/ZhipuProvider';
+export { QwenProvider } from './models/QwenProvider';
+export type { QwenProviderConfig } from './models/QwenProvider';
+export { MoonshotProvider } from './models/MoonshotProvider';
+export type { MoonshotProviderConfig } from './models/MoonshotProvider';
+export { OllamaProvider } from './models/OllamaProvider';
+export type { OllamaProviderConfig } from './models/OllamaProvider';
 
 // ── Integrity ──
 export {

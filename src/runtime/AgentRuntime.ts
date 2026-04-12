@@ -103,6 +103,8 @@ import { buildIntegrityBinding, buildResponseEnvelope } from '../models/integrit
 import type { ResponseEnvelopeParams } from '../models/integrity';
 import type { IntentVerifier, IntentVerdict } from '../intent/IntentVerification';
 import { LLMResponseGuard, type GuardConfig as LLMGuardConfig, type ToolCallProposal as LLMToolCallProposal, SupplyChainGuard } from '@veridex/agentic-payments';
+import { AgentRegistryBridge } from '../registry/AgentRegistryBridge';
+import type { AgentRegistryConfig } from '../registry/AgentRegistryBridge';
 import {
   SecurityPolicyPackManager,
   injectionDetectionPack,
@@ -188,6 +190,10 @@ export class AgentRuntime {
   private readonly canaryToken: string;
   private readonly canaryDeployer: CanaryCredentialDeployer | null = null;
 
+  // Agent Registry Bridge (SDK ↔ Portal sync)
+  readonly registryBridge: AgentRegistryBridge | null = null;
+  private registryReady: Promise<void> | null = null;
+
   // Config
   private enableTracing: boolean;
   private enableCheckpoints: boolean;
@@ -208,6 +214,9 @@ export class AgentRuntime {
 
   // Intent Verification
   private intentVerifier: IntentVerifier | null = null;
+
+  // Standalone Security Gateway (dual-layer enforcement)
+  private securityGateway: RuntimeOptions['securityGateway'] | null = null;
 
   // Run counter
   private runCounter = 0;
@@ -462,6 +471,25 @@ export class AgentRuntime {
     if (options?.intentVerifier) {
       this.intentVerifier = options.intentVerifier;
     }
+
+    // ── Agent Registry Bridge — SDK ↔ Portal bidirectional sync ──
+    if (options?.registryBridge) {
+      const bridge = new AgentRegistryBridge(options.registryBridge);
+      (this as { registryBridge: AgentRegistryBridge | null }).registryBridge = bridge;
+      const autoRegister = options.registryBridge.autoRegister !== false;
+      if (autoRegister) {
+        this.registryReady = bridge.register(this.definition).then(() => {
+          // Registration successful — agent is now visible in the portal
+        }).catch((err) => {
+          console.warn('[AgentRegistryBridge] Auto-registration failed:', err);
+        });
+      }
+    }
+
+    // ── Standalone Security Gateway (dual-layer enforcement) ──
+    if (options?.securityGateway) {
+      this.securityGateway = options.securityGateway;
+    }
   }
 
   /** Get the most recently compiled context plan for a run. */
@@ -486,6 +514,29 @@ export class AgentRuntime {
       await this.integrityReady;
     }
     return this.integrityBinding;
+  }
+
+  /** Await registry bridge auto-registration completion (no-op if bridge not configured). */
+  async awaitRegistration(): Promise<string | null> {
+    if (this.registryReady) {
+      await this.registryReady;
+    }
+    return this.registryBridge?.getRegisteredAgentId() ?? null;
+  }
+
+  /**
+   * Load a portal-created agent's metadata from the relayer and return a
+   * partial AgentDefinition stub. The caller must supply model config and
+   * tools to create a full runtime.
+   */
+  static async loadFromPortal(
+    registryConfig: AgentRegistryConfig,
+    agentId: string,
+  ): Promise<(Partial<AgentDefinition> & { id: string; name: string }) | null> {
+    const bridge = new AgentRegistryBridge(registryConfig);
+    const agent = await bridge.getAgent(agentId);
+    if (!agent) return null;
+    return bridge.toDefinitionStub(agent);
   }
 
   /**
@@ -1923,6 +1974,78 @@ export class AgentRuntime {
                 policyDecision: decision,
               } satisfies ProposalControlResult;
             }
+          }
+        }
+
+        // ── Standalone Security Gateway (dual-layer enforcement) ──
+        // When configured, evaluates the same proposal through the framework-agnostic
+        // security gateway used by external (non-SDK) agents. Worst-verdict-wins.
+        if (this.securityGateway) {
+          try {
+            const p = proposal as ActionProposal;
+            let actionType: string;
+            let toolCalls: Array<{ name: string; arguments: Record<string, unknown>; description?: string }> | undefined;
+            let content: string | undefined;
+            let targetAgentId: string | undefined;
+
+            switch (p.type) {
+              case 'tool_call':
+                actionType = 'tool_call';
+                toolCalls = p.toolCalls.map((tc) => ({ name: tc.name, arguments: (tc as any).args ?? {}, description: (tc as any).description }));
+                break;
+              case 'final_answer':
+                actionType = 'llm_call';
+                content = p.answer;
+                break;
+              case 'handoff':
+                actionType = 'handoff';
+                targetAgentId = p.targetAgentId;
+                content = p.context;
+                break;
+              case 'memory_write':
+                actionType = 'memory_write';
+                break;
+              default:
+                actionType = 'custom';
+                break;
+            }
+
+            const gwResult = await this.securityGateway.evaluate({
+              agent: { agentId: this.definition.id, name: this.definition.name, framework: 'veridex-sdk' },
+              action: { type: actionType, toolCalls, content, targetAgentId },
+              runId: run.id,
+              turnIndex,
+              runSpendUsd: this.payments?.getRunSpend() ?? 0,
+              totalTokens: run.totalUsage.totalTokens,
+            });
+
+            if (gwResult.verdict === 'block') {
+              const gwDecision: PolicyDecision = {
+                verdict: 'block',
+                riskScore: gwResult.riskScore,
+                reasons: gwResult.reasons.map((r: string) => `[SecurityGateway] ${r}`),
+                checks: [],
+                evaluatedAt: Date.now(),
+              };
+              run.policyDecisions.push(gwDecision);
+              this.emitEvent({
+                id: eventId(),
+                type: 'policy_evaluated',
+                runId: run.id,
+                agentId: this.definition.id,
+                turnIndex,
+                timestamp: Date.now(),
+                data: { verdict: 'block', riskScore: gwResult.riskScore, reasons: gwDecision.reasons },
+              } as TraceEvent);
+              return {
+                blocked: true,
+                terminalState: 'failed',
+                reasons: gwDecision.reasons,
+                policyDecision: gwDecision,
+              } satisfies ProposalControlResult;
+            }
+          } catch (gwErr) {
+            console.warn('[SecurityGateway] Evaluation failed (non-blocking):', gwErr);
           }
         }
 

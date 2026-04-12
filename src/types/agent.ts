@@ -182,4 +182,27 @@ export interface RuntimeOptions {
   enableIntegrity?: boolean;
   /** Intent verifier pipeline for pre-policy action verification. */
   intentVerifier?: import('../intent/IntentVerification').IntentVerifier;
+  /**
+   * Agent registry bridge config. When provided, the agent auto-registers
+   * in the relayer so it appears in the developer portal, and can load
+   * portal-created agents.
+   */
+  registryBridge?: import('../registry/AgentRegistryBridge').AgentRegistryConfig;
+  /**
+   * Standalone security gateway instance from @veridex/agent-security.
+   * When provided, each proposal is evaluated through both the internal
+   * PolicyEngine AND the standalone gateway, with worst-verdict-wins.
+   * This is the same gateway external (non-SDK) agents use, ensuring
+   * parity of security enforcement.
+   */
+  securityGateway?: {
+    evaluate(ctx: {
+      agent: { agentId: string; name?: string; framework?: string };
+      action: { type: string; toolCalls?: Array<{ name: string; arguments: Record<string, unknown>; description?: string }>; content?: string; amountUsd?: number; chain?: string; targetAddress?: string; targetAgentId?: string };
+      runId?: string;
+      turnIndex?: number;
+      runSpendUsd?: number;
+      totalTokens?: number;
+    }): Promise<{ verdict: string; riskScore: number; reasons: string[]; checks: unknown[]; packsEvaluated: string[]; evaluatedAt: number; durationMs: number }>;
+  };
 }
