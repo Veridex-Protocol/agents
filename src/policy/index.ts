@@ -7,4 +7,18 @@ export {
   maxRunSpendUSD,
   maxTokenBudget,
   allowChains,
+  requireVerifiedEnvelope,
 } from './PolicyEngine';
+export {
+  buildUnifiedPolicyContext,
+  resolveConstraints,
+  isDelegationAllowed,
+  ENFORCEMENT_PRIORITY,
+} from './UnifiedPolicyContext';
+export type {
+  EnforcementLevel,
+  LeveledConstraint,
+  DelegationEntry,
+  TransportPolicyContext,
+  UnifiedPolicyContext,
+} from './UnifiedPolicyContext';

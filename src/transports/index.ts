@@ -50,3 +50,7 @@ export {
   DEFAULT_TIMEOUT_POLICY,
   DEFAULT_CIRCUIT_BREAKER_CONFIG,
 } from './types';
+
+// ── Transport Boundary PEP ──
+export { TransportBoundaryPEP } from './TransportBoundaryPEP';
+export type { BoundaryPEPResult, BoundaryPEPConfig, TransportPEPContext } from './TransportBoundaryPEP';

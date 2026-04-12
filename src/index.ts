@@ -178,6 +178,11 @@ export type {
   BrowserSessionRef,
   BrowserArtifactRef,
   BrowserCapabilityMetadata,
+  // Identity
+  AgentIdentityClaims,
+  AgentIntegrityBinding,
+  ResponseEnvelope,
+  PolicyEnvelopeEntry,
 } from './types';
 
 // ── Events ──
@@ -190,6 +195,19 @@ export type { OpenAIProviderConfig } from './models/OpenAIProvider';
 export { AnthropicProvider } from './models/AnthropicProvider';
 export type { AnthropicProviderConfig } from './models/AnthropicProvider';
 export { ModelRegistry } from './models/ModelRegistry';
+
+// ── Integrity ──
+export {
+  canonicalJSON,
+  sha256,
+  hashAgentDefinition,
+  hashToolManifest,
+  computeAgentChecksum,
+  buildIntegrityBinding,
+  buildResponseEnvelope,
+  verifyResponseEnvelope,
+} from './models/integrity';
+export type { ResponseEnvelopeParams } from './models/integrity';
 
 // ── Tools ──
 export { ToolRegistry } from './tools/ToolRegistry';
@@ -265,8 +283,76 @@ export type {
 } from './integrations/WorkspaceStateAdapter';
 
 // ── Policy ──
-export { PolicyEngine, blockSafetyClasses, requireApprovalFor, maxRunSpendUSD, maxTokenBudget, allowChains } from './policy';
+export { PolicyEngine, blockSafetyClasses, requireApprovalFor, maxRunSpendUSD, maxTokenBudget, allowChains, requireVerifiedEnvelope } from './policy';
+export { buildUnifiedPolicyContext, resolveConstraints, isDelegationAllowed, ENFORCEMENT_PRIORITY } from './policy';
 export type { PolicyRule, PolicyContext } from './policy';
+export type {
+  EnforcementLevel,
+  LeveledConstraint,
+  DelegationEntry,
+  TransportPolicyContext,
+  UnifiedPolicyContext,
+} from './policy';
+
+// ── Intent Verification ──
+export { KeywordFilter, NLIVerifier, BenignOverride, IntentVerifier, DEFAULT_FINANCIAL_BLOCKLIST } from './intent';
+export type {
+  IntentCheckResult,
+  IntentVerdict,
+  IntentContext,
+  KeywordFilterConfig,
+  NLIBackend,
+  NLIVerifierConfig,
+  BenignOverrideConfig,
+  IntentVerifierConfig,
+} from './intent';
+
+// ── Credentials ──
+export { buildMandateCredential, verifyMandateCredential, RevocationRegistry } from './credentials';
+export type {
+  VCProof,
+  VerifiableCredential,
+  CredentialStatus,
+  MandateSpendingLimit,
+  MandateActionConstraint,
+  MandateDelegation,
+  MandateCredentialSubject,
+  MandateCredential,
+  BuildMandateParams,
+  MandateVerificationResult,
+} from './credentials';
+
+// ── Recovery (VA-DAR) ──
+export { VADARKeySchedule, InMemoryArtifactStore, DeRecBridge, hkdfDerive, bytesToHex, hexToBytes, encryptArtifact, decryptArtifact, hmacSHA256 } from './recovery';
+export type {
+  DerivedKey,
+  KeyScheduleConfig,
+  RecoveryArtifact,
+  ArtifactStoreBackend,
+  DeRecShare,
+  DeRecHelper,
+} from './recovery';
+
+// ── Advanced (Phase 4) ──
+export { MockTEEAttestor, MockZKComplianceProver, SBTReputationTracker, activateEnvelope, DEFAULT_ENVELOPE_ACTIVATION } from './advanced';
+export type {
+  TEEPlatform,
+  TEEAttestation,
+  TEEVerificationResult,
+  TEEAttestor,
+  ZKProofSystem,
+  ZKComplianceProof,
+  ZKComplianceClaimType,
+  ZKComplianceClaim,
+  ZKVerificationResult,
+  ZKComplianceProver,
+  ReputationDimension,
+  ReputationScore,
+  SBTReputation,
+  ReputationUpdate,
+  EnvelopeActivationConfig,
+  EnvelopeActivationResult,
+} from './advanced';
 
 // ── Approvals ──
 export { ApprovalManager } from './approvals';
@@ -297,6 +383,7 @@ export { eventToSSE, streamToSSE, streamTokens } from './streaming';
 // ── Transports ──
 export { MCPServerTransport, ACPTransport, A2ATransport } from './transports';
 export { RetryExecutor, CircuitBreaker, TransportPolicyEvaluator, RemoteCallTracer, CapabilityManifestRegistry } from './transports';
+export { TransportBoundaryPEP } from './transports';
 export { DEFAULT_RETRY_POLICY, DEFAULT_TIMEOUT_POLICY, DEFAULT_CIRCUIT_BREAKER_CONFIG } from './transports';
 export type {
   Transport,
@@ -332,6 +419,9 @@ export type {
   RemoteCallTracerOptions,
   StartCallParams,
   FinishCallParams,
+  // Transport Boundary PEP
+  BoundaryPEPResult,
+  BoundaryPEPConfig,
 } from './transports';
 
 // ── Orchestration ──

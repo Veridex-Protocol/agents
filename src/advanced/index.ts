@@ -1,0 +1,25 @@
+export {
+  MockTEEAttestor,
+  MockZKComplianceProver,
+  SBTReputationTracker,
+  activateEnvelope,
+  DEFAULT_ENVELOPE_ACTIVATION,
+} from './AdvancedPrimitives';
+export type {
+  TEEPlatform,
+  TEEAttestation,
+  TEEVerificationResult,
+  TEEAttestor,
+  ZKProofSystem,
+  ZKComplianceProof,
+  ZKComplianceClaimType,
+  ZKComplianceClaim,
+  ZKVerificationResult,
+  ZKComplianceProver,
+  ReputationDimension,
+  ReputationScore,
+  SBTReputation,
+  ReputationUpdate,
+  EnvelopeActivationConfig,
+  EnvelopeActivationResult,
+} from './AdvancedPrimitives';

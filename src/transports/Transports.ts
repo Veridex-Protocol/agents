@@ -6,6 +6,7 @@
  */
 
 import type { ToolContract } from '../types/tools';
+import type { TransportBoundaryPEP, BoundaryPEPResult, TransportPEPContext } from './TransportBoundaryPEP';
 
 type FetchLike = typeof fetch;
 
@@ -68,6 +69,14 @@ export class MCPServerTransport implements Transport {
   state: TransportState = 'disconnected';
   private tools: Map<string, ToolContract> = new Map();
   private handler?: (call: MCPToolCall) => Promise<MCPToolResponse>;
+  private pep?: TransportBoundaryPEP;
+  /** Last PEP evaluation result (for testing/audit). */
+  lastPEPResult?: BoundaryPEPResult;
+
+  /** Set an optional transport boundary PEP for identity/integrity checks. */
+  setPEP(pep: TransportBoundaryPEP): void {
+    this.pep = pep;
+  }
 
   /** Register Veridex tools to expose via MCP. */
   registerTools(tools: ToolContract[]): void {
@@ -92,8 +101,19 @@ export class MCPServerTransport implements Transport {
     this.handler = handler;
   }
 
-  /** Handle an incoming MCP tool call. */
-  async handleToolCall(call: MCPToolCall): Promise<MCPToolResponse> {
+  /** Handle an incoming MCP tool call. Runs PEP if configured. */
+  async handleToolCall(call: MCPToolCall, transportContext?: TransportPEPContext): Promise<MCPToolResponse> {
+    if (this.pep && transportContext) {
+      const pepResult = this.pep.evaluate(transportContext);
+      this.lastPEPResult = pepResult;
+      if (!pepResult.allowed) {
+        return {
+          content: [{ type: 'text', text: `Transport PEP blocked: ${pepResult.reasons.join('; ')}` }],
+          isError: true,
+        };
+      }
+    }
+
     if (this.handler) {
       return this.handler(call);
     }
@@ -185,6 +205,9 @@ export class ACPTransport implements Transport {
   private readonly auth?: TransportAuthConfig;
   private readonly defaultHeaders?: Record<string, string>;
   private readonly invoker?: ACPTransportConfig['invoker'];
+  private pep?: TransportBoundaryPEP;
+  /** Last PEP evaluation result (for testing/audit). */
+  lastPEPResult?: BoundaryPEPResult;
 
   constructor(config?: ACPTransportConfig) {
     this.fetchImpl = config?.fetch ?? globalThis.fetch.bind(globalThis);
@@ -192,6 +215,11 @@ export class ACPTransport implements Transport {
     this.auth = config?.auth;
     this.defaultHeaders = config?.headers;
     this.invoker = config?.invoker;
+  }
+
+  /** Set an optional transport boundary PEP for identity/integrity checks. */
+  setPEP(pep: TransportBoundaryPEP): void {
+    this.pep = pep;
   }
 
   /** Register capabilities this agent offers via ACP. */
@@ -209,8 +237,20 @@ export class ACPTransport implements Transport {
     this.taskHandler = handler;
   }
 
-  /** Handle an incoming ACP task request. */
-  async handleTask(request: ACPTaskRequest): Promise<ACPTaskResponse> {
+  /** Handle an incoming ACP task request. Runs PEP if configured. */
+  async handleTask(request: ACPTaskRequest, transportContext?: TransportPEPContext): Promise<ACPTaskResponse> {
+    if (this.pep && transportContext) {
+      const pepResult = this.pep.evaluate(transportContext);
+      this.lastPEPResult = pepResult;
+      if (!pepResult.allowed) {
+        return {
+          taskId: request.taskId,
+          status: 'failed',
+          error: `Transport PEP blocked: ${pepResult.reasons.join('; ')}`,
+        };
+      }
+    }
+
     if (!this.taskHandler) {
       return {
         taskId: request.taskId,
@@ -391,6 +431,9 @@ export class A2ATransport implements Transport {
   private readonly auth?: TransportAuthConfig;
   private readonly defaultHeaders?: Record<string, string>;
   private readonly rpcMethods: string[];
+  private pep?: TransportBoundaryPEP;
+  /** Last PEP evaluation result (for testing/audit). */
+  lastPEPResult?: BoundaryPEPResult;
 
   constructor(config?: A2ATransportConfig) {
     this.fetchImpl = config?.fetch ?? globalThis.fetch.bind(globalThis);
@@ -398,6 +441,11 @@ export class A2ATransport implements Transport {
     this.auth = config?.auth;
     this.defaultHeaders = config?.headers;
     this.rpcMethods = config?.rpcMethods ?? ['message/send', 'tasks/send'];
+  }
+
+  /** Set an optional transport boundary PEP for identity/integrity checks. */
+  setPEP(pep: TransportBoundaryPEP): void {
+    this.pep = pep;
   }
 
   /** Set this agent's A2A agent card for discovery. */
@@ -415,8 +463,16 @@ export class A2ATransport implements Transport {
     this.taskHandler = handler;
   }
 
-  /** Handle an incoming A2A task. */
-  async handleTask(task: A2ATask): Promise<A2ATaskResult> {
+  /** Handle an incoming A2A task. Runs PEP if configured. */
+  async handleTask(task: A2ATask, transportContext?: TransportPEPContext): Promise<A2ATaskResult> {
+    if (this.pep && transportContext) {
+      const pepResult = this.pep.evaluate(transportContext);
+      this.lastPEPResult = pepResult;
+      if (!pepResult.allowed) {
+        return { id: task.id, status: 'failed', error: `Transport PEP blocked: ${pepResult.reasons.join('; ')}` };
+      }
+    }
+
     if (!this.taskHandler) {
       return { id: task.id, status: 'failed', error: 'No task handler registered' };
     }

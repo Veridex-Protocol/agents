@@ -177,6 +177,40 @@ export function allowChains(chains: string[]): PolicyRule {
   };
 }
 
+/** Bump risk score when the agent lacks a verified response envelope. */
+export function requireVerifiedEnvelope(riskBump = 0.5): PolicyRule {
+  return {
+    id: 'builtin:require-verified-envelope',
+    name: 'Require Verified Envelope',
+    description: 'Flags runs where the response envelope is absent or unverified',
+    evaluate(ctx) {
+      const envelope = ctx.metadata?.responseEnvelope;
+      if (!envelope) {
+        return {
+          ruleId: this.id,
+          ruleName: this.name,
+          passed: true,
+          verdict: 'flag',
+          reason: 'No response envelope — integrity unverifiable',
+          riskContribution: riskBump,
+        };
+      }
+      const integrityBinding = ctx.metadata?.integrityBinding;
+      if (!integrityBinding) {
+        return {
+          ruleId: this.id,
+          ruleName: this.name,
+          passed: true,
+          verdict: 'flag',
+          reason: 'Response envelope present but no integrity binding — limited trust',
+          riskContribution: riskBump * 0.5,
+        };
+      }
+      return { ruleId: this.id, ruleName: this.name, passed: true, verdict: 'pass', reason: 'Verified envelope and integrity binding present', riskContribution: 0 };
+    },
+  };
+}
+
 // ── Policy Engine ──
 
 /** Severity order for verdicts (most severe first). */

@@ -19,3 +19,4 @@ export * from './proposals';
 export * from './policy';
 export * from './bootstrap';
 export * from './accountability';
+export * from './identity';

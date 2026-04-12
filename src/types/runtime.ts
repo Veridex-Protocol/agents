@@ -16,6 +16,7 @@ import type { CapabilitySource } from './execution';
 import type { TranscriptEntry, TranscriptRef } from './transcript';
 import type { RuntimeBootstrapReport } from './bootstrap';
 import type { ExecutionGraph, ExecutionGraphRef } from './accountability';
+import type { ResponseEnvelope } from './identity';
 import type { ApprovalDecision, ApprovalMode } from '../approvals/ApprovalManager';
 import type { ToolExecutionSummary } from '../audit/AuditEmitter';
 
@@ -233,6 +234,8 @@ export interface RunResult {
   executionGraph?: ExecutionGraph | null;
   /** Bootstrap/setup report used for this runtime. */
   bootstrapReport: RuntimeBootstrapReport;
+  /** Tamper-evident response envelope (present when identity claims are configured). */
+  responseEnvelope?: ResponseEnvelope | null;
 }
 
 /** Approval or operator input used to resume a suspended run. */

@@ -25,6 +25,7 @@ import type {
   RunStore,
   ThreadStore,
 } from './accountability';
+import type { AgentIdentityClaims } from './identity';
 
 // ── Agent Definition ──
 
@@ -175,4 +176,10 @@ export interface RuntimeOptions {
   retrievalPolicy?: ContextRetrievalPolicy;
   /** Validators for governed memory/resource proposals before commit */
   memoryProposalValidators?: MemoryProposalValidator[];
+  /** Agent identity claims (OIDC-A). When provided, identity + integrity are computed at boot. */
+  identityClaims?: AgentIdentityClaims;
+  /** Whether to compute and cache agent integrity binding at boot (default: true when identityClaims present) */
+  enableIntegrity?: boolean;
+  /** Intent verifier pipeline for pre-policy action verification. */
+  intentVerifier?: import('../intent/IntentVerification').IntentVerifier;
 }
