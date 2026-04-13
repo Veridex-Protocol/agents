@@ -2,6 +2,8 @@ export { OpenAIProvider } from './OpenAIProvider';
 export type { OpenAIProviderConfig } from './OpenAIProvider';
 export { AnthropicProvider } from './AnthropicProvider';
 export type { AnthropicProviderConfig } from './AnthropicProvider';
+export { GeminiProvider } from './GeminiProvider';
+export type { GeminiProviderConfig } from './GeminiProvider';
 export { ModelRegistry } from './ModelRegistry';
 
 // ── OpenAI-Compatible Base ──

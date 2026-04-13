@@ -198,6 +198,8 @@ export { OpenAIProvider } from './models/OpenAIProvider';
 export type { OpenAIProviderConfig } from './models/OpenAIProvider';
 export { AnthropicProvider } from './models/AnthropicProvider';
 export type { AnthropicProviderConfig } from './models/AnthropicProvider';
+export { GeminiProvider } from './models/GeminiProvider';
+export type { GeminiProviderConfig } from './models/GeminiProvider';
 export { ModelRegistry } from './models/ModelRegistry';
 export { OpenAICompatibleProvider } from './models/OpenAICompatibleProvider';
 export type { OpenAICompatibleConfig } from './models/OpenAICompatibleProvider';
