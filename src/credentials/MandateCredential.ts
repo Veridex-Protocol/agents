@@ -155,8 +155,7 @@ export interface MandateVerificationResult {
 
 /**
  * Verify a mandate credential against current context.
- * Does NOT verify cryptographic signatures — that's the caller's responsibility.
- * This verifies semantic validity: expiration, revocation, spending, constraints.
+ * Validates: proof presence, expiration, revocation, spending, constraints.
  */
 export function verifyMandateCredential(
   credential: MandateCredential,
@@ -174,6 +173,19 @@ export function verifyMandateCredential(
   let expired = false;
   let revoked = false;
   let spendingExceeded = false;
+
+  // VDX-AUTH-008: Require cryptographic proof
+  if (!credential.proof) {
+    reasons.push('Missing cryptographic proof — credential cannot be trusted');
+    return { valid: false, reasons, expired, revoked, spendingExceeded, constraintViolations };
+  }
+
+  // Validate proof structure
+  const proof = credential.proof;
+  if (!proof.type || !proof.verificationMethod || !proof.proofValue) {
+    reasons.push('Incomplete proof — missing type, verificationMethod, or proofValue');
+    return { valid: false, reasons, expired, revoked, spendingExceeded, constraintViolations };
+  }
 
   // Check expiration
   if (credential.expirationDate) {

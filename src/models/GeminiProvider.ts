@@ -204,7 +204,7 @@ export class GeminiProvider implements ModelProvider {
     const parts = (contentObj?.parts ?? []) as Array<Record<string, unknown>>;
 
     let content = '';
-    const toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }> = [];
+    const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
 
     for (const part of parts) {
       if (part.text) {
@@ -215,7 +215,7 @@ export class GeminiProvider implements ModelProvider {
         toolCalls.push({
           id: `call_${Math.random().toString(36).slice(2, 10)}`,
           name: fc.name as string,
-          arguments: (fc.args ?? {}) as Record<string, unknown>,
+          arguments: JSON.stringify(fc.args ?? {}),
         });
       }
     }
@@ -320,7 +320,7 @@ export class GeminiProvider implements ModelProvider {
       ? Array.from(toolCalls.values()).map((tc) => ({
           id: tc.id,
           name: tc.name,
-          arguments: JSON.parse(tc.args) as Record<string, unknown>,
+          arguments: tc.args,
         }))
       : undefined;
 
