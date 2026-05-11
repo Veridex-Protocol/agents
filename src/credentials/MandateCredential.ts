@@ -260,28 +260,125 @@ export function verifyMandateCredential(
 // ── Revocation Registry ──
 
 /**
- * In-memory StatusList2021 revocation registry.
- * Tracks which credential indices have been revoked.
+ * Persistence adapter for the revocation registry.
  *
- * Production implementations should back this with persistent storage.
+ * Implementations are expected to be backed by durable storage (Postgres via
+ * Prisma, Redis, Cloud KV, etc.). All methods are async so the registry stays
+ * correct under multi-instance deploys: revocations survive restarts and
+ * propagate across relayer replicas.
+ *
+ * The default `InMemoryRevocationStore` is provided for tests and local dev.
+ * Production deployments MUST override this with a persistent implementation.
+ */
+export interface RevocationStore {
+  /** Load the full revoked / suspended set (called once at startup). */
+  hydrate(): Promise<{ revoked: number[]; suspended: number[] }>;
+  /** Persist a revocation. Must be durable before resolving. */
+  persistRevoke(index: number, reason?: string): Promise<void>;
+  /** Persist a suspension. */
+  persistSuspend(index: number, reason?: string): Promise<void>;
+  /** Persist a reinstatement. */
+  persistReinstate(index: number): Promise<void>;
+}
+
+/** Broadcast channel used to fan out revocation events across instances. */
+export interface RevocationBroadcaster {
+  /** Publish an event so peer instances can update their in-memory mirrors. */
+  publish(event: RevocationEvent): Promise<void>;
+  /** Subscribe to peer events; the callback updates local in-memory state. */
+  subscribe(handler: (event: RevocationEvent) => void): () => void;
+}
+
+export type RevocationEvent =
+  | { kind: 'revoke'; index: number; reason?: string }
+  | { kind: 'suspend'; index: number; reason?: string }
+  | { kind: 'reinstate'; index: number };
+
+/** Default in-memory store — suitable for tests and single-process dev only. */
+export class InMemoryRevocationStore implements RevocationStore {
+  private readonly revoked = new Set<number>();
+  private readonly suspended = new Set<number>();
+  async hydrate(): Promise<{ revoked: number[]; suspended: number[] }> {
+    return { revoked: [...this.revoked], suspended: [...this.suspended] };
+  }
+  async persistRevoke(index: number): Promise<void> {
+    this.revoked.add(index);
+    this.suspended.delete(index);
+  }
+  async persistSuspend(index: number): Promise<void> {
+    this.suspended.add(index);
+  }
+  async persistReinstate(index: number): Promise<void> {
+    this.suspended.delete(index);
+  }
+}
+
+/**
+ * StatusList2021 revocation registry with pluggable persistence.
+ *
+ * Behaviour:
+ * - All queries (`isRevoked`, `isSuspended`, `isActive`) are served from the
+ *   in-memory mirror so the hot path stays O(1) with zero I/O.
+ * - All mutations (`revoke`, `suspend`, `reinstate`) are persisted via the
+ *   configured `RevocationStore` and then broadcast so peer instances can
+ *   update their mirrors. If persistence fails the mirror is NOT updated
+ *   (fail-closed: the caller sees an error, the state stays consistent).
+ *
+ * For backward compatibility the parameter-less constructor keeps the old
+ * in-memory-only semantics; callers must explicitly opt into persistence.
  */
 export class RevocationRegistry {
   private readonly revoked = new Set<number>();
   private readonly suspended = new Set<number>();
+  private readonly store: RevocationStore;
+  private readonly broadcaster?: RevocationBroadcaster;
+  private unsubscribe?: () => void;
+  private hydrated = false;
 
-  /** Revoke a credential by its status list index. */
-  revoke(index: number): void {
+  constructor(options: { store?: RevocationStore; broadcaster?: RevocationBroadcaster } = {}) {
+    this.store = options.store ?? new InMemoryRevocationStore();
+    this.broadcaster = options.broadcaster;
+
+    if (this.broadcaster) {
+      this.unsubscribe = this.broadcaster.subscribe((event) => this.applyRemote(event));
+    }
+  }
+
+  /** Load persisted state. Safe to call multiple times — subsequent calls are no-ops. */
+  async hydrate(): Promise<void> {
+    if (this.hydrated) return;
+    const { revoked, suspended } = await this.store.hydrate();
+    for (const i of revoked) this.revoked.add(i);
+    for (const i of suspended) this.suspended.add(i);
+    this.hydrated = true;
+  }
+
+  /** Detach the broadcaster subscription (call on shutdown). */
+  dispose(): void {
+    this.unsubscribe?.();
+    this.unsubscribe = undefined;
+  }
+
+  /** Revoke a credential by its status list index. Throws if persistence fails. */
+  async revoke(index: number, reason?: string): Promise<void> {
+    await this.store.persistRevoke(index, reason);
     this.revoked.add(index);
+    this.suspended.delete(index);
+    await this.broadcaster?.publish({ kind: 'revoke', index, reason });
   }
 
   /** Suspend a credential (reversible). */
-  suspend(index: number): void {
+  async suspend(index: number, reason?: string): Promise<void> {
+    await this.store.persistSuspend(index, reason);
     this.suspended.add(index);
+    await this.broadcaster?.publish({ kind: 'suspend', index, reason });
   }
 
   /** Reinstate a suspended credential. */
-  reinstate(index: number): void {
+  async reinstate(index: number): Promise<void> {
+    await this.store.persistReinstate(index);
     this.suspended.delete(index);
+    await this.broadcaster?.publish({ kind: 'reinstate', index });
   }
 
   /** Check if a credential is revoked (permanent). */
@@ -312,5 +409,21 @@ export class RevocationRegistry {
   /** Total number of revoked + suspended credentials. */
   get size(): number {
     return this.revoked.size + this.suspended.size;
+  }
+
+  /** Apply a remote event without re-persisting or re-broadcasting. */
+  private applyRemote(event: RevocationEvent): void {
+    switch (event.kind) {
+      case 'revoke':
+        this.revoked.add(event.index);
+        this.suspended.delete(event.index);
+        break;
+      case 'suspend':
+        this.suspended.add(event.index);
+        break;
+      case 'reinstate':
+        this.suspended.delete(event.index);
+        break;
+    }
   }
 }

@@ -24,6 +24,49 @@ export type ToolSafetyClass =
 
 // ── Tool Contract ──
 
+/**
+ * Structured guidance composed into the description shown to the model.
+ *
+ * Anthropic's "Writing tools for agents" guidance argues that tool
+ * descriptions should answer four questions explicitly:
+ *
+ *   1. What does this tool do? (one sentence verb phrase)
+ *   2. When SHOULD the model use it? (concrete situations)
+ *   3. When should the model NOT use it? (anti-patterns, alternatives)
+ *   4. What does a successful result look like?
+ *
+ * These fields encode that contract. `compileToolDescription()` flattens
+ * them into the single `description` string the model actually sees.
+ */
+export interface ToolDescriptionGuidance {
+  /** One-sentence verb phrase. "Fetch the on-chain balance for a wallet." */
+  summary?: string;
+  /** Concrete situations where the model should reach for this tool. */
+  whenToUse?: string[];
+  /** Anti-patterns or cases where a different tool is better. */
+  whenNotToUse?: string[];
+  /** Description of what a successful result looks like. */
+  successExample?: string;
+}
+
+/**
+ * Templates that shape error messages into something the model can act on.
+ *
+ * Anthropic's research found a ~40% reduction in retry loops just from
+ * rewriting error messages to be model-actionable. A bad message says
+ * `Error: 400 Bad Request`. A good one says
+ * `Token limit 500 exceeded — summarise the input or pass a smaller chunk.`
+ *
+ * Template strings may reference `{message}` (the underlying error message)
+ * and any keys present in the `details` object passed to `formatToolError`.
+ */
+export interface ToolErrorTemplates {
+  /** Default template used when no specific code matches. */
+  default?: string;
+  /** Per-error-code templates. Keys are stable error codes, e.g. `timeout`, `rate_limited`, `validation`, `not_found`. */
+  byCode?: Record<string, string>;
+}
+
 /** A typed contract defining a tool's interface, behavior, and constraints. */
 export interface ToolContract<
   TInput = unknown,
@@ -31,8 +74,13 @@ export interface ToolContract<
 > {
   /** Unique tool name */
   name: string;
-  /** Human-readable description (shown to model) */
+  /**
+   * Human-readable description (shown to model). Built automatically by
+   * the `tool()` helper from `guidance` if not supplied directly.
+   */
   description: string;
+  /** Structured description guidance (preserved for introspection / lint). */
+  guidance?: ToolDescriptionGuidance;
   /** Input schema (Zod or JSON Schema) */
   input: z.ZodType<TInput> | Record<string, unknown>;
   /** Output schema (Zod or JSON Schema, optional) */
@@ -51,6 +99,8 @@ export interface ToolContract<
   permissions?: string[];
   /** Cost estimate behavior */
   costEstimate?: (input: TInput) => CostEstimate;
+  /** Templates for shaping error messages into model-actionable feedback. */
+  errorTemplates?: ToolErrorTemplates;
   /** Source metadata preserved across imports/bridges. */
   metadata?: Record<string, unknown>;
 }

@@ -6,6 +6,7 @@
  */
 
 import type { ToolContract } from '../types/tools';
+import { lintToolContract, type ToolLintIssue } from './tool';
 
 export class ToolRegistry {
   private tools = new Map<string, ToolContract>();
@@ -46,5 +47,19 @@ export class ToolRegistry {
   /** Clear all tools. */
   clear(): void {
     this.tools.clear();
+  }
+
+  /**
+   * Lint every registered tool against the description-discipline rules.
+   * Returns one entry per tool with the issues found.
+   *
+   * Intended for use in CI / development boot, not on every register
+   * call — some hosts deliberately ship terse tool descriptions.
+   */
+  lint(): Array<{ name: string; issues: ToolLintIssue[] }> {
+    return Array.from(this.tools.values()).map((t) => ({
+      name: t.name,
+      issues: lintToolContract(t),
+    }));
   }
 }

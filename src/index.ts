@@ -75,6 +75,8 @@ export type {
   ToolAttachment,
   ToolMetrics,
   CostEstimate,
+  ToolDescriptionGuidance,
+  ToolErrorTemplates,
   // Execution
   CapabilitySource,
   ExecutionCapabilityKind,
@@ -234,8 +236,13 @@ export { ToolRegistry } from './tools/ToolRegistry';
 export { ToolExecutor } from './tools/ToolExecutor';
 export type { ToolExecutionResult } from './tools/ToolExecutor';
 export { ToolValidator } from './tools/ToolValidator';
-export { tool } from './tools/tool';
-export type { ToolOptions } from './tools/tool';
+export {
+  tool,
+  compileToolDescription,
+  formatToolError,
+  lintToolContract,
+} from './tools/tool';
+export type { ToolOptions, ToolLintIssue } from './tools/tool';
 export { createPlanningTools } from './tools/PlanningTools';
 export type { PlanningToolsOptions, TodoEntry } from './tools/PlanningTools';
 export { createFilesystemTools } from './tools/FilesystemTools';
@@ -243,6 +250,21 @@ export type { FilesystemToolsOptions } from './tools/FilesystemTools';
 export { createSubagentTools } from './tools/SubagentTools';
 export type { SubagentToolsOptions, SubagentEntry, SubagentExecutor } from './tools/SubagentTools';
 export { ExecutionSurfaceRegistry } from './execution';
+export {
+  DenyAllSandbox,
+  LocalProcessSandbox,
+  createSandboxedExecTool,
+} from './execution/Sandbox';
+export type {
+  SandboxRuntime,
+  SandboxCapabilities,
+  SandboxLanguage,
+  SandboxExecuteRequest,
+  SandboxExecuteResult,
+  SandboxNetworkPolicy,
+  LocalProcessSandboxOptions,
+  SandboxedExecToolOptions,
+} from './execution/Sandbox';
 
 // ── Hooks ──
 export { HookRegistry } from './hooks/HookRegistry';
@@ -256,6 +278,25 @@ export { DEFAULT_RETRIEVAL_POLICY } from './context/ContextCompiler';
 // ── Memory ──
 export { MemoryManager } from './memory/MemoryManager';
 export { InMemoryStore } from './memory/InMemoryStore';
+export {
+  InMemoryEpisodicStore,
+  InMemoryEntityRegistry,
+  InMemoryTemporalGraph,
+  HighlightConcatenatingSummariser,
+  createInMemoryLongHorizonMemory,
+} from './memory/LongHorizonMemory';
+export type {
+  Episode,
+  EpisodeQuery,
+  EpisodeSummariser,
+  EpisodicMemoryStore,
+  Entity,
+  EntityRegistry,
+  TemporalEdge,
+  TemporalEdgeQuery,
+  TemporalGraph,
+  LongHorizonMemory,
+} from './memory/LongHorizonMemory';
 export { InMemoryTranscriptStore, FileTranscriptStore } from './transcript';
 export {
   InMemoryRunStore,

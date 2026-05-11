@@ -259,7 +259,10 @@ describe('AgentRuntime', () => {
 
       const firstCallMessages = (provider.complete as ReturnType<typeof vi.fn>).mock.calls[0][0] as ModelMessage[];
       const systemContext = firstCallMessages.find(
-        (message, index) => message.role === 'system' && index > 0,
+        (message) =>
+          message.role === 'system' &&
+          typeof message.content === 'string' &&
+          message.content.includes('Runtime context:'),
       );
       expect(systemContext?.content).toContain('Runtime context:');
       expect(systemContext?.content).toContain('The customer is Acme Corp.');

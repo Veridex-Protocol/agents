@@ -2,6 +2,7 @@ export {
   buildMandateCredential,
   verifyMandateCredential,
   RevocationRegistry,
+  InMemoryRevocationStore,
 } from './MandateCredential';
 export type {
   VCProof,
@@ -14,4 +15,7 @@ export type {
   MandateCredential,
   BuildMandateParams,
   MandateVerificationResult,
+  RevocationStore,
+  RevocationBroadcaster,
+  RevocationEvent,
 } from './MandateCredential';

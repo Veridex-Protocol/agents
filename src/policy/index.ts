@@ -10,6 +10,16 @@ export {
   requireVerifiedEnvelope,
 } from './PolicyEngine';
 export {
+  compileDeclarativePolicy,
+  DeclarativePolicySchema,
+} from './DeclarativePolicy';
+export type {
+  DeclarativePolicy,
+  DeclarativePolicyRule,
+  PolicyVerb,
+  CompileOptions as DeclarativePolicyCompileOptions,
+} from './DeclarativePolicy';
+export {
   buildUnifiedPolicyContext,
   resolveConstraints,
   isDelegationAllowed,
