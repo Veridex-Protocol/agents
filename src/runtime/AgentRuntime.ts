@@ -73,6 +73,17 @@ import { HookRegistry } from '../hooks/HookRegistry';
 import { HookRunner } from '../hooks/HookRunner';
 import { ContextCompiler } from '../context/ContextCompiler';
 import { DEFAULT_RETRIEVAL_POLICY } from '../context/ContextCompiler';
+import {
+  HomeostaticContextEngine,
+  type CompactionTrigger,
+  type FidelityReport,
+  type HomeostaticContextEngineOptions,
+} from '../context/HomeostaticContextEngine';
+import type { Compactor } from '../context/Compactor';
+import {
+  createLoadToolBuiltin,
+  renderDisclosedCatalog,
+} from '../tools/ToolDisclosureTools';
 import { MemoryManager } from '../memory/MemoryManager';
 import { CheckpointManager } from '../checkpoints/CheckpointManager';
 import { InMemoryTranscriptStore } from '../transcript';
@@ -102,7 +113,15 @@ import type { AgentIdentityClaims, AgentIntegrityBinding, ResponseEnvelope } fro
 import { buildIntegrityBinding, buildResponseEnvelope } from '../models/integrity';
 import type { ResponseEnvelopeParams } from '../models/integrity';
 import type { IntentVerifier, IntentVerdict } from '../intent/IntentVerification';
-import { LLMResponseGuard, type GuardConfig as LLMGuardConfig, type ToolCallProposal as LLMToolCallProposal, SupplyChainGuard } from '@veridex/agentic-payments';
+import {
+  type LLMResponseGuard,
+  type SupplyChainGuard,
+  type GuardToolCallProposal,
+  NoopLLMResponseGuard,
+  NoopSupplyChainGuard,
+  generateCanaryToken,
+} from './guards';
+import type { RuntimePlugin, RuntimePluginContext } from './RuntimePlugin';
 import { AgentRegistryBridge } from '../registry/AgentRegistryBridge';
 import type { AgentRegistryConfig } from '../registry/AgentRegistryBridge';
 import {
@@ -186,6 +205,8 @@ export class AgentRuntime {
   readonly approvals: ApprovalManager;
   readonly audit: AuditEmitter;
   readonly llmResponseGuard: LLMResponseGuard;
+  readonly supplyChainGuard: SupplyChainGuard;
+  private readonly plugins: RuntimePlugin[] = [];
   readonly securityPackManager: SecurityPolicyPackManager;
   private readonly canaryToken: string;
   private readonly canaryDeployer: CanaryCredentialDeployer | null = null;
@@ -206,6 +227,9 @@ export class AgentRuntime {
   private handoffHandlers = new Map<string, HandoffHandler>();
   private retrievalPolicy: ContextRetrievalPolicy;
   private memoryProposalValidators: MemoryProposalValidator[];
+  private homeostatic: HomeostaticContextEngine | null = null;
+  private compactor: Compactor | null = null;
+  private progressiveToolDisclosure = false;
 
   // Identity & Integrity
   private identityClaims: AgentIdentityClaims | null = null;
@@ -257,12 +281,24 @@ export class AgentRuntime {
       }
     }
 
+    // Initialise progressive-tool-disclosure flag early so that the
+    // tool-registration block below can auto-register the load_tool built-in.
+    this.progressiveToolDisclosure = options?.progressiveToolDisclosure === true;
+
     // Register tools
     if (definition.tools) {
       for (const tool of definition.tools) {
         this.tools.register(tool);
         this.executionSurface.registerTool(tool);
       }
+    }
+
+    // Progressive tool disclosure: register the load_tool built-in so
+    // the model can fetch full schemas on demand.
+    if (this.progressiveToolDisclosure) {
+      const loadTool = createLoadToolBuiltin((name) => this.tools.get(name));
+      this.tools.register(loadTool);
+      this.executionSurface.registerTool(loadTool);
     }
 
     if (options?.executionCapabilities) {
@@ -300,6 +336,17 @@ export class AgentRuntime {
       : null;
     this.retrievalPolicy = options?.retrievalPolicy ?? DEFAULT_RETRIEVAL_POLICY;
 
+    // Optional fidelity-aware (homeostatic) context engine.
+    if (options?.homeostatic) {
+      this.homeostatic =
+        options.homeostatic instanceof HomeostaticContextEngine
+          ? options.homeostatic
+          : new HomeostaticContextEngine(
+              options.homeostatic as HomeostaticContextEngineOptions,
+            );
+    }
+    this.compactor = options?.compactor ?? null;
+
     // Config
     this.enableTracing = options?.enableTracing !== false;
     this.enableCheckpoints = options?.enableCheckpoints === true;
@@ -315,21 +362,50 @@ export class AgentRuntime {
     this.approvals = new ApprovalManager();
     this.audit = new AuditEmitter();
 
-    // LLM Response Guard — validates model outputs before tool execution
+    // LLM Response Guard — validates model outputs before tool execution.
+    // Defaults to a no-op so the runtime has zero hard dependency on payments;
+    // a real guard can be supplied via `options.llmResponseGuard` or a plugin.
     this.canaryToken = (options as Record<string, unknown>)?.llmGuardCanaryToken as string
-      ?? LLMResponseGuard.generateCanaryToken();
-    const knownToolNames = new Set<string>();
-    if (definition.tools) {
-      for (const tool of definition.tools) {
-        if (tool.name) knownToolNames.add(tool.name);
+      ?? generateCanaryToken();
+    const injectedLLMGuard = (options as Record<string, unknown>)?.llmResponseGuard as
+      | LLMResponseGuard
+      | undefined;
+    this.llmResponseGuard = injectedLLMGuard ?? new NoopLLMResponseGuard();
+    const injectedSupplyChainGuard = (options as Record<string, unknown>)?.supplyChainGuard as
+      | SupplyChainGuard
+      | undefined;
+    this.supplyChainGuard = injectedSupplyChainGuard ?? new NoopSupplyChainGuard();
+
+    // ── Runtime plugins ── install before the supply-chain check so plugins
+    // can swap in a real guard implementation.
+    const installedPlugins = (options as Record<string, unknown>)?.plugins as
+      | RuntimePlugin[]
+      | undefined;
+    if (installedPlugins && installedPlugins.length > 0) {
+      const pluginCtx: RuntimePluginContext = {
+        agentId: this.definition.id,
+        canaryToken: this.canaryToken,
+        setLLMResponseGuard: (g: LLMResponseGuard) => {
+          (this as { llmResponseGuard: LLMResponseGuard }).llmResponseGuard = g;
+        },
+        setSupplyChainGuard: (g: SupplyChainGuard) => {
+          (this as { supplyChainGuard: SupplyChainGuard }).supplyChainGuard = g;
+        },
+        registerTool: (tool) => {
+          this.tools.register(tool);
+        },
+        registerHook: (hook) => {
+          this.hooks.register(hook);
+        },
+        registerPolicy: (rule) => {
+          this.policyEngine.register(rule);
+        },
+      };
+      for (const plugin of installedPlugins) {
+        plugin.install(pluginCtx);
+        this.plugins.push(plugin);
       }
     }
-    this.llmResponseGuard = new LLMResponseGuard({
-      canaryToken: this.canaryToken,
-      maxFinancialActionsPerTurn: 3,
-      allowedAddresses: (options as Record<string, unknown>)?.llmGuardAllowedAddresses as Set<string> | undefined,
-      knownTools: knownToolNames.size > 0 ? knownToolNames : undefined,
-    });
 
     // Register policy rules from options
     if (options?.policyRules) {
@@ -388,8 +464,7 @@ export class AgentRuntime {
     });
 
     // ── Supply Chain Guard — startup environment verification ──
-    const supplyChainGuard = new SupplyChainGuard();
-    const envCheck = supplyChainGuard.verifyEnvironment();
+    const envCheck = this.supplyChainGuard.verifyEnvironment();
     if (!envCheck.safe) {
       const criticalIssues = envCheck.issues.filter((i) => i.severity === 'critical');
       if (criticalIssues.length > 0) {
@@ -1399,7 +1474,7 @@ export class AgentRuntime {
     // Execute proposal
     // ── LLM Response Guard — validate model output before tool execution ──
     if (proposal.type === 'tool_call' && proposal.toolCalls?.length) {
-      const guardToolCalls: LLMToolCallProposal[] = proposal.toolCalls.map((tc: ToolCall) => ({
+      const guardToolCalls: GuardToolCallProposal[] = proposal.toolCalls.map((tc: ToolCall) => ({
         name: tc.name,
         arguments: (tc.arguments ?? {}) as Record<string, unknown>,
       }));
@@ -2018,6 +2093,7 @@ export class AgentRuntime {
               runSpendUsd: this.payments?.getRunSpend() ?? 0,
               totalTokens: run.totalUsage.totalTokens,
             });
+            // TODO: why was the sovereignty violation events for compliance audit trail removed? Re-add with proper event type and handling in compliance module
 
             if (gwResult.verdict === 'block') {
               const gwDecision: PolicyDecision = {
@@ -2788,6 +2864,69 @@ export class AgentRuntime {
     }
   }
 
+  private emitFidelityEvent(
+    runId: string,
+    turnIndex: number,
+    report: FidelityReport,
+  ): void {
+    this.emitEvent({
+      id: eventId(),
+      type: 'context_fidelity',
+      runId,
+      agentId: this.definition.id,
+      turnIndex,
+      timestamp: report.emittedAt,
+      data: {
+        modelId: report.modelId,
+        promptTokens: report.promptTokens,
+        fidelity: report.fidelity,
+        fidelityTarget: report.fidelityTarget,
+        pGate: report.pGate,
+        pGateUsage: report.pGateUsage,
+        compactionTriggered: report.compactionTriggered,
+        reasons: report.reasons,
+      },
+    });
+  }
+
+  private emitCompactedEvent(
+    runId: string,
+    turnIndex: number,
+    compactorId: string,
+    result: {
+      tokensShed: number;
+      actions: ReadonlyArray<{
+        sectionId: string;
+        kind: string;
+        reason?: string;
+        tokensBefore: number;
+        tokensAfter: number;
+      }>;
+      notes?: string;
+    },
+  ): void {
+    this.emitEvent({
+      id: eventId(),
+      type: 'context_compacted',
+      runId,
+      agentId: this.definition.id,
+      turnIndex,
+      timestamp: Date.now(),
+      data: {
+        compactorId,
+        tokensShed: result.tokensShed,
+        actions: result.actions.map((a) => ({
+          sectionId: a.sectionId,
+          kind: a.kind,
+          reason: a.reason,
+          tokensBefore: a.tokensBefore,
+          tokensAfter: a.tokensAfter,
+        })),
+        notes: result.notes,
+      },
+    });
+  }
+
   private async runHooks(
     phase: HookPhase,
     context: unknown,
@@ -2882,14 +3021,64 @@ export class AgentRuntime {
       throw new Error(`Context compilation denied by hook: ${beforeCompile.reasons.join('; ')}`);
     }
 
-    const plan = this.context.compileWithPolicy({
+    const compileOptions = {
       maxTokens: this.estimateContextBudget(run),
       sections,
       includeMemory: memorySections.length > 0,
       includeTools: this.tools.getAll().length > 0,
       includeHistory: run.turns.length > 0,
       maxHistoryTurns: DEFAULT_HISTORY_TURNS,
-    }, this.retrievalPolicy);
+    };
+
+    let plan: ContextPlan;
+    if (this.homeostatic) {
+      let homeoPlan = this.homeostatic.compileWithPolicy(
+        compileOptions,
+        this.retrievalPolicy,
+      );
+      this.emitFidelityEvent(run.id, turnIndex, homeoPlan.fidelityReport);
+
+      if (homeoPlan.compactionTriggered && this.compactor) {
+        try {
+          const trigger: CompactionTrigger = {
+            ...homeoPlan.fidelityReport,
+            plan: homeoPlan,
+          };
+          const result = await this.compactor.compact({
+            trigger,
+            fidelityModel: this.homeostatic.fidelityModel,
+            fidelityTarget: this.homeostatic.fidelityTarget,
+            compactionThreshold: this.homeostatic.compactionThreshold,
+          });
+          // Recompile from rewritten sections.
+          homeoPlan = this.homeostatic.compileWithPolicy(
+            { ...compileOptions, sections: result.sections },
+            this.retrievalPolicy,
+          );
+          this.emitCompactedEvent(run.id, turnIndex, this.compactor.id, result);
+          this.emitFidelityEvent(run.id, turnIndex, homeoPlan.fidelityReport);
+        } catch (err) {
+          // Compaction failure must not break the run; fall back to the
+          // pre-compaction plan and surface as an error event.
+          this.emitEvent({
+            id: eventId(),
+            type: 'error_occurred',
+            runId: run.id,
+            agentId: this.definition.id,
+            turnIndex,
+            timestamp: Date.now(),
+            data: {
+              error: err instanceof Error ? err.message : String(err),
+              phase: 'compactor',
+              recoverable: true,
+            },
+          });
+        }
+      }
+      plan = homeoPlan;
+    } else {
+      plan = this.context.compileWithPolicy(compileOptions, this.retrievalPolicy);
+    }
 
     const afterCompile = await this.runHooks('afterContextCompile', {
       runId: run.id,
@@ -2972,6 +3161,10 @@ export class AgentRuntime {
   private serializeToolCatalog(): string {
     const tools = this.tools.getAll();
     if (tools.length === 0) return '';
+
+    if (this.progressiveToolDisclosure) {
+      return renderDisclosedCatalog(tools);
+    }
 
     return tools.map((tool) => {
       const detail: string[] = [
@@ -3648,5 +3841,24 @@ export class AgentRuntime {
         contentHash: bundle.contentHash,
       },
     });
+  }
+
+  /**
+   * Dispose installed plugins. Idempotent; safe to call multiple times.
+   * Plugin `dispose()` errors are caught and logged so one failing plugin
+   * does not prevent others from cleaning up.
+   */
+  dispose(): void {
+    while (this.plugins.length > 0) {
+      const plugin = this.plugins.pop();
+      try {
+        plugin?.dispose?.();
+      } catch (err) {
+        console.warn(
+          `[AgentRuntime] plugin "${plugin?.id ?? '<unknown>'}" dispose() threw:`,
+          err,
+        );
+      }
+    }
   }
 }

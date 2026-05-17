@@ -1,3 +1,22 @@
+/**
+ * @packageDocumentation
+ * @module @veridex/agents/security
+ * @description
+ * Runtime-native security packs that return `SecurityPolicyPack` shapes for
+ * the {@link AgentRuntime}'s policy engine and hook runner.
+ *
+ * For **framework-agnostic** detection packs (cross-framework — LangChain,
+ * CrewAI, custom agents) prefer the canonical home in
+ * [`@veridex/agent-security`](../../agents-security). To bridge that gateway
+ * into the runtime, use
+ * {@link import('../integrations/SecurityGatewayPlugin').securityGatewayPlugin}.
+ *
+ * The two surfaces share detection intent (injection, tool poisoning, etc.)
+ * but produce different output shapes (`PolicyRule`/`RuntimeHook` here vs
+ * `SecurityPack` in the gateway). Full pattern-primitive unification is
+ * tracked as a future refactor.
+ */
+
 export { SecurityPolicyPackManager } from './SecurityPolicyPackManager';
 export {
   injectionDetectionPack,

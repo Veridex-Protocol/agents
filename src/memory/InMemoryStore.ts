@@ -205,4 +205,28 @@ export class InMemoryStore implements MemoryStore {
   get size(): number {
     return this.entries.size;
   }
+
+  /**
+   * In-place patch of an entry's mutable fields. Returns the updated
+   * entry or null if the id is unknown. Used by `MemoryLifecycle` for
+   * decay, promotion, and confidence adjustments without changing IDs.
+   */
+  async update(
+    id: string,
+    patch: Partial<
+      Pick<MemoryEntry, 'tier' | 'confidence' | 'tags' | 'metadata' | 'derivation' | 'ttlMs' | 'content'>
+    >,
+  ): Promise<MemoryEntry | null> {
+    const existing = this.entries.get(id);
+    if (!existing) return null;
+    if (patch.tier !== undefined) existing.tier = patch.tier;
+    if (patch.confidence !== undefined) existing.confidence = patch.confidence;
+    if (patch.tags !== undefined) existing.tags = [...patch.tags];
+    if (patch.metadata !== undefined) existing.metadata = { ...patch.metadata };
+    if (patch.derivation !== undefined) existing.derivation = patch.derivation;
+    if (patch.ttlMs !== undefined) existing.ttlMs = patch.ttlMs;
+    if (patch.content !== undefined) existing.content = patch.content;
+    existing.lastAccessedAt = Date.now();
+    return { ...existing };
+  }
 }

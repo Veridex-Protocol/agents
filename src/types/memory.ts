@@ -16,7 +16,17 @@
 export type MemoryTier = 'working' | 'episodic' | 'semantic' | 'procedural';
 
 /** Logical classification for a memory entry. */
-export type MemoryEntryKind = 'note' | 'workspace_state' | 'derived_memory' | 'evidence';
+export type MemoryEntryKind =
+  | 'note'
+  | 'workspace_state'
+  | 'derived_memory'
+  | 'evidence'
+  /**
+   * Persisted shared-encoding state for a thread. Stores a serialized
+   * {@link EncodingTracker} snapshot so warm/cold classification
+   * survives process restarts. See `EncodingState.ts`.
+   */
+  | 'encoding';
 
 /** Authority for a referenced state object. */
 export type MemoryStateAuthority = 'runtime' | 'control_plane' | 'external';

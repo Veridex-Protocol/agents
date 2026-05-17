@@ -87,3 +87,28 @@ export type {
   ExperimentReport,
 } from './experiment';
 export { runExperiment } from './experiment';
+
+// Stateful evaluation (Phase 5)
+export {
+  diffMemorySnapshots,
+  RubricStateJudge,
+  runStatefulScenarios,
+  compareTrajectories,
+  gateRegressions,
+} from './stateful';
+export type {
+  MemoryEntrySnapshot,
+  MemorySnapshot,
+  MemoryDiff,
+  TrajectoryTurnSnapshot,
+  StatefulTrajectory,
+  StateRubricCriterion,
+  JudgeResult,
+  StateJudge,
+  StatefulScenarioRun,
+  StatefulRunReport,
+  StatefulScenarioInput,
+  StatefulRunnerOptions,
+  RegressionEntry,
+  RegressionReport,
+} from './stateful';

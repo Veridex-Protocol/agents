@@ -19,6 +19,8 @@ export type TraceEventType =
   | 'bootstrap_report_generated'
   | 'message_received'
   | 'context_compiled'
+  | 'context_fidelity'
+  | 'context_compacted'
   | 'model_call_started'
   | 'model_call_completed'
   | 'token_streamed'
@@ -79,6 +81,30 @@ export interface BootstrapReportGeneratedEvent extends BaseTraceEvent {
 export interface ContextCompiledEvent extends BaseTraceEvent {
   type: 'context_compiled';
   data: { totalTokens: number; sectionCount: number; hadTruncation: boolean };
+}
+
+export interface ContextFidelityEvent extends BaseTraceEvent {
+  type: 'context_fidelity';
+  data: {
+    modelId: string;
+    promptTokens: number;
+    fidelity: number;
+    fidelityTarget: number;
+    pGate: number;
+    pGateUsage: number;
+    compactionTriggered: boolean;
+    reasons: string[];
+  };
+}
+
+export interface ContextCompactedEvent extends BaseTraceEvent {
+  type: 'context_compacted';
+  data: {
+    compactorId: string;
+    tokensShed: number;
+    actions: Array<{ sectionId: string; kind: string; reason?: string; tokensBefore: number; tokensAfter: number }>;
+    notes?: string;
+  };
 }
 
 export interface ModelCallStartedEvent extends BaseTraceEvent {
@@ -229,6 +255,8 @@ export type TraceEvent =
   | BootstrapReportGeneratedEvent
   | MessageReceivedEvent
   | ContextCompiledEvent
+  | ContextFidelityEvent
+  | ContextCompactedEvent
   | ModelCallStartedEvent
   | ModelCallCompletedEvent
   | TokenStreamedEvent

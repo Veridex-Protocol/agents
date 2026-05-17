@@ -174,6 +174,29 @@ export interface RuntimeOptions {
   workspaceStateProvider?: WorkspaceStateProvider;
   /** Context retrieval policy controlling source ordering and per-source defaults */
   retrievalPolicy?: ContextRetrievalPolicy;
+  /**
+   * Opt-in fidelity-aware context engine. When provided (or set to an
+   * options object), the runtime wraps the {@link ContextCompiler} with
+   * a {@link HomeostaticContextEngine} and emits `context_fidelity`
+   * events on every compile.
+   */
+  homeostatic?:
+    | import('../context/HomeostaticContextEngine').HomeostaticContextEngine
+    | import('../context/HomeostaticContextEngine').HomeostaticContextEngineOptions;
+  /**
+   * Compactor invoked when the homeostatic engine fires a compaction
+   * trigger. Required for actual rewriting; without it, triggers are
+   * surfaced as events only.
+   */
+  compactor?: import('../context/Compactor').Compactor;
+  /**
+   * When `true`, the runtime renders only one-line summaries in the
+   * tool catalog section of the system prompt and auto-registers a
+   * built-in `load_tool(name)` action so the model can fetch full
+   * schemas on demand. Reduces baseline prompt tokens by 60–90% for
+   * agents with large tool surfaces. Defaults to `false`.
+   */
+  progressiveToolDisclosure?: boolean;
   /** Validators for governed memory/resource proposals before commit */
   memoryProposalValidators?: MemoryProposalValidator[];
   /** Agent identity claims (OIDC-A). When provided, identity + integrity are computed at boot. */

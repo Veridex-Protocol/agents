@@ -36,6 +36,21 @@
 export { AgentRuntime } from './runtime/AgentRuntime';
 export { createAgent } from './runtime/createAgent';
 export { buildRuntimeBootstrapReport } from './runtime/bootstrap';
+export {
+  NoopLLMResponseGuard,
+  NoopSupplyChainGuard,
+  generateCanaryToken,
+} from './runtime/guards';
+export type {
+  LLMResponseGuard,
+  SupplyChainGuard,
+  GuardToolCallProposal,
+  GuardViolation,
+  LLMResponseValidation,
+  SupplyChainCheck,
+  SupplyChainIssue,
+} from './runtime/guards';
+export type { RuntimePlugin, RuntimePluginContext } from './runtime/RuntimePlugin';
 
 // ── Agent Registry Bridge ──
 export { AgentRegistryBridge } from './registry/AgentRegistryBridge';
@@ -274,6 +289,35 @@ export type { HookRunResult } from './hooks/HookRunner';
 // ── Context ──
 export { ContextCompiler } from './context/ContextCompiler';
 export { DEFAULT_RETRIEVAL_POLICY } from './context/ContextCompiler';
+export {
+  LinearFidelityModel,
+  MODEL_DEGRADATION,
+  degradationFor,
+  registerModelDegradation,
+  resolveFidelityModel,
+} from './context/FidelityModel';
+export type { FidelityModel } from './context/FidelityModel';
+export { HomeostaticContextEngine } from './context/HomeostaticContextEngine';
+export type {
+  CompactionReason,
+  CompactionTrigger,
+  FidelityReport,
+  HomeostaticContextEngineOptions,
+  HomeostaticContextPlan,
+} from './context/HomeostaticContextEngine';
+export {
+  DeterministicCompactor,
+  LLMRewriteCompactor,
+  DEFAULT_PROTECTED_SOURCES,
+} from './context/Compactor';
+export type {
+  Compactor,
+  CompactionAction,
+  CompactionActionKind,
+  CompactionRequest,
+  CompactionResult,
+  SummariseFn,
+} from './context/Compactor';
 
 // ── Memory ──
 export { MemoryManager } from './memory/MemoryManager';
@@ -297,6 +341,36 @@ export type {
   TemporalGraph,
   LongHorizonMemory,
 } from './memory/LongHorizonMemory';
+export { InMemorySemanticGraph } from './memory/SemanticMemoryGraph';
+export type {
+  SemanticMemoryGraph,
+  MemoryEdge,
+  MemoryEdgeKind,
+  AddEdgeInput,
+  EdgeQuery,
+} from './memory/SemanticMemoryGraph';
+export { MemoryLifecycle } from './memory/MemoryLifecycle';
+export type {
+  MutableMemoryStore,
+  EmbedFn,
+  DedupeOptions,
+  PromoteOptions,
+  DecayOptions,
+  MemoryLifecycleOptions,
+  DedupeResult,
+  PromoteResult,
+  DecayResult,
+  ReconcileResult,
+  LifecycleReport,
+} from './memory/MemoryLifecycle';
+export { createMemoryTools } from './memory/MemoryTools';
+export type { CreateMemoryToolsOptions } from './memory/MemoryTools';
+export { HybridRetriever } from './memory/HybridRetriever';
+export type {
+  RetrievalMode,
+  HybridRetrievalOptions,
+  ScoredMemory,
+} from './memory/HybridRetriever';
 export { InMemoryTranscriptStore, FileTranscriptStore } from './transcript';
 export {
   InMemoryRunStore,
@@ -332,6 +406,10 @@ export { CoreAdapter } from './integrations/CoreAdapter';
 export type { CoreAdapterConfig } from './integrations/CoreAdapter';
 export { PaymentsAdapter } from './integrations/PaymentsAdapter';
 export type { PaymentsAdapterConfig } from './integrations/PaymentsAdapter';
+export { paymentsGuardsPlugin } from './integrations/PaymentsGuardsPlugin';
+export type { PaymentsGuardsPluginOptions } from './integrations/PaymentsGuardsPlugin';
+export { securityGatewayPlugin } from './integrations/SecurityGatewayPlugin';
+export type { SecurityGatewayPluginOptions } from './integrations/SecurityGatewayPlugin';
 export { WorkspaceStateAdapter } from './integrations/WorkspaceStateAdapter';
 export type {
   WorkspaceStateProvider,
@@ -599,3 +677,49 @@ export type {
   ExperimentReport,
 } from './evals';
 export { runExperiment } from './evals';
+
+// Skills (Phase 4) — first-class Skill primitive with progressive
+// disclosure, resolver, audits, packs, and the skillify lifecycle.
+export * from './skills';
+
+// ── Phase 5: harness UX (deploy, ralph loop, observability) ──
+// Model router — declarative task-aware model selection.
+export * from './routing';
+// Sandbox lifecycle — per-session sandbox pool with snapshot/restore.
+export {
+  InMemorySandboxLifecycleManager,
+} from './execution';
+export type {
+  SandboxLifecycleManager,
+  SandboxFactory,
+  SandboxSnapshot,
+  InMemoryLifecycleOptions,
+} from './execution';
+// Deploy bundler + CLI.
+export * from './deploy';
+// Stateful evaluation harness — already surfaced via `export * from './evals'`
+// indirection above, but we re-export the new symbols explicitly so
+// downstream tooling can discover them via auto-import.
+export {
+  diffMemorySnapshots,
+  RubricStateJudge,
+  runStatefulScenarios,
+  compareTrajectories,
+  gateRegressions,
+} from './evals/stateful';
+export type {
+  MemoryEntrySnapshot,
+  MemorySnapshot as StatefulMemorySnapshot,
+  MemoryDiff,
+  TrajectoryTurnSnapshot,
+  StatefulTrajectory,
+  StateRubricCriterion,
+  JudgeResult as StateJudgeResult,
+  StateJudge,
+  StatefulScenarioRun,
+  StatefulRunReport,
+  StatefulScenarioInput,
+  StatefulRunnerOptions,
+  RegressionEntry,
+  RegressionReport,
+} from './evals/stateful';
