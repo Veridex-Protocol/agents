@@ -1,6 +1,6 @@
 {
   "name": "@veridex/agents",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Veridex Agent Fabric — TypeScript-first agent runtime with native payments, policy, identity, and trust",
   "license": "MIT",
   "author": "Veridex Team",
@@ -150,7 +150,7 @@
   "peerDependencies": {
     "@anthropic-ai/sdk": ">=0.39.0",
     "openai": ">=4.70.0",
-    "@veridex/sdk": "1.1.4",
+    "@veridex/sdk": "1.1.5",
     "@veridex/agentic-payments": "2.0.7"
   },
   "peerDependenciesMeta": {
