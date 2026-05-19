@@ -52,6 +52,9 @@ export interface ModelToolCall {
   name: string;
   /** Tool arguments as JSON string */
   arguments: string;
+  /** Provider-specific opaque metadata that must be echoed back on subsequent
+   *  turns (e.g. Gemini 2.5/3 `thoughtSignature`). Treat as opaque. */
+  providerMetadata?: Record<string, unknown>;
 }
 
 // ── Model Response ──

@@ -197,4 +197,7 @@ export interface ToolCall {
   arguments: Record<string, unknown>;
   /** Tool call ID (for correlating results) */
   id: string;
+  /** Provider-specific opaque metadata (e.g. Gemini `thoughtSignature`) that
+   *  must be echoed back in subsequent turns. Treat as opaque. */
+  providerMetadata?: Record<string, unknown>;
 }

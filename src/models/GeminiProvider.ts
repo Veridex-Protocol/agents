@@ -133,6 +133,16 @@ export class GeminiProvider implements ModelProvider {
     let systemInstruction: Record<string, unknown> | null = null;
     const contents: Array<Record<string, unknown>> = [];
 
+    // Gemini's functionResponse part requires the original function *name*,
+    // not the OpenAI-style tool-call id. Build an id → name map as we walk
+    // the assistant messages so we can rewrite later tool result messages.
+    const toolCallIdToName = new Map<string, string>();
+    for (const m of messages) {
+      if (m.role === 'assistant' && m.toolCalls) {
+        for (const tc of m.toolCalls) toolCallIdToName.set(tc.id, tc.name);
+      }
+    }
+
     for (const msg of messages) {
       if (msg.role === 'system') {
         // Gemini uses systemInstruction at top level, not in contents
@@ -143,13 +153,23 @@ export class GeminiProvider implements ModelProvider {
       }
 
       if (msg.role === 'tool') {
-        // Tool result — must be a functionResponse part
+        // Tool result — must be a functionResponse part. The name must be the
+        // original function name; the response value must be an object.
+        const fnName = (msg.toolCallId && toolCallIdToName.get(msg.toolCallId)) ?? msg.toolCallId ?? 'unknown';
+        let responseValue: unknown = { result: msg.content };
+        // If the tool returned JSON, surface it as a structured object.
+        if (typeof msg.content === 'string') {
+          const trimmed = msg.content.trim();
+          if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+            try { responseValue = { result: JSON.parse(trimmed) }; } catch { /* keep string */ }
+          }
+        }
         contents.push({
           role: 'function',
           parts: [{
             functionResponse: {
-              name: msg.toolCallId ?? 'unknown',
-              response: { result: msg.content },
+              name: fnName,
+              response: responseValue,
             },
           }],
         });
@@ -162,14 +182,34 @@ export class GeminiProvider implements ModelProvider {
           parts.push({ text: msg.content });
         }
         if (msg.toolCalls?.length) {
-          for (const tc of msg.toolCalls) {
-            parts.push({
+          msg.toolCalls.forEach((tc, idx) => {
+            // Gemini expects `args` to be a Struct (object), not a JSON string.
+            let argsObj: Record<string, unknown> = {};
+            if (typeof tc.arguments === 'string' && tc.arguments.length > 0) {
+              try { argsObj = JSON.parse(tc.arguments) as Record<string, unknown>; }
+              catch { argsObj = {}; }
+            } else if (tc.arguments && typeof tc.arguments === 'object') {
+              argsObj = tc.arguments as Record<string, unknown>;
+            }
+            const part: Record<string, unknown> = {
               functionCall: {
                 name: tc.name,
-                args: tc.arguments,
+                args: argsObj,
               },
-            });
-          }
+            };
+            // Per Gemini docs: only the FIRST functionCall part in a model
+            // response carries a thoughtSignature. Parallel siblings MUST NOT
+            // include one. Preserve whatever the model gave us; if absent on
+            // the first part, fall back to the documented validator-skip token.
+            //   https://ai.google.dev/gemini-api/docs/thought-signatures
+            const sig = tc.providerMetadata?.thoughtSignature;
+            if (typeof sig === 'string' && sig.length > 0) {
+              part.thoughtSignature = sig;
+            } else if (idx === 0) {
+              part.thoughtSignature = 'skip_thought_signature_validator';
+            }
+            parts.push(part);
+          });
         }
         if (parts.length > 0) {
           contents.push({ role: 'model', parts });
@@ -191,7 +231,7 @@ export class GeminiProvider implements ModelProvider {
     return {
       name: tool.name,
       description: tool.description,
-      parameters: tool.parameters ?? { type: 'object', properties: {} },
+      parameters: sanitizeGeminiSchema(tool.parameters) ?? { type: 'object', properties: {} },
     };
   }
 
@@ -212,10 +252,12 @@ export class GeminiProvider implements ModelProvider {
       }
       if (part.functionCall) {
         const fc = part.functionCall as Record<string, unknown>;
+        const sig = part.thoughtSignature as string | undefined;
         toolCalls.push({
           id: `call_${Math.random().toString(36).slice(2, 10)}`,
           name: fc.name as string,
           arguments: JSON.stringify(fc.args ?? {}),
+          ...(sig ? { providerMetadata: { thoughtSignature: sig } } : {}),
         });
       }
     }
@@ -251,7 +293,7 @@ export class GeminiProvider implements ModelProvider {
     const decoder = new TextDecoder();
 
     let content = '';
-    const toolCalls = new Map<number, { id: string; name: string; args: string }>();
+    const toolCalls = new Map<number, { id: string; name: string; args: string; thoughtSignature?: string }>();
     let finishReason: string | undefined;
     let promptTokens = 0;
     let completionTokens = 0;
@@ -293,11 +335,13 @@ export class GeminiProvider implements ModelProvider {
           }
           if (part.functionCall) {
             const fc = part.functionCall as Record<string, unknown>;
+            const sig = part.thoughtSignature as string | undefined;
             const idx = toolCalls.size;
             toolCalls.set(idx, {
               id: `call_${Math.random().toString(36).slice(2, 10)}`,
               name: fc.name as string,
               args: JSON.stringify(fc.args ?? {}),
+              ...(sig ? { thoughtSignature: sig } : {}),
             });
           }
         }
@@ -321,6 +365,7 @@ export class GeminiProvider implements ModelProvider {
           id: tc.id,
           name: tc.name,
           arguments: tc.args,
+          ...(tc.thoughtSignature ? { providerMetadata: { thoughtSignature: tc.thoughtSignature } } : {}),
         }))
       : undefined;
 
@@ -354,4 +399,46 @@ export class GeminiProvider implements ModelProvider {
           : 'stop';
     }
   }
+}
+
+/**
+ * Gemini's function-calling schema is a strict subset of OpenAPI 3.0. It
+ * rejects fields commonly emitted by JSON-Schema generators (zod-to-json-schema,
+ * etc.) such as `additionalProperties`, `$schema`, `$ref`, and `definitions`.
+ * Strip them recursively so callers can pass standard JSON schemas without
+ * having to know Gemini's quirks.
+ */
+function sanitizeGeminiSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) {
+    return schema.map((item) => sanitizeGeminiSchema(item));
+  }
+  if (!schema || typeof schema !== 'object') {
+    return schema;
+  }
+  // Gemini supports only a subset of OpenAPI 3.0 fields. Use an allowlist so any
+  // unknown JSON-Schema vocab (exclusiveMinimum, multipleOf, $ref, etc.) is
+  // dropped silently instead of 400-ing the request.
+  //   https://ai.google.dev/api/caching#Schema
+  const ALLOW = new Set([
+    'type', 'format', 'description', 'nullable', 'enum',
+    'maxItems', 'minItems', 'properties', 'required', 'propertyOrdering',
+    'items', 'anyOf', 'default', 'minimum', 'maximum',
+    'minLength', 'maxLength', 'pattern', 'title',
+  ]);
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema as Record<string, unknown>)) {
+    if (!ALLOW.has(key)) continue;
+    // `properties` is a map of name→schema. Recurse on each VALUE but keep all
+    // keys (they're user-defined property names, not schema vocab).
+    if (key === 'properties' && value && typeof value === 'object' && !Array.isArray(value)) {
+      const props: Record<string, unknown> = {};
+      for (const [name, subSchema] of Object.entries(value as Record<string, unknown>)) {
+        props[name] = sanitizeGeminiSchema(subSchema);
+      }
+      out[key] = props;
+      continue;
+    }
+    out[key] = sanitizeGeminiSchema(value);
+  }
+  return out;
 }

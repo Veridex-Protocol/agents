@@ -1614,6 +1614,7 @@ export class AgentRuntime {
               id: tc.id,
               name: tc.name,
               arguments: JSON.stringify(tc.arguments),
+              ...(tc.providerMetadata ? { providerMetadata: tc.providerMetadata } : {}),
             }))
           : undefined,
       });
@@ -1677,6 +1678,7 @@ export class AgentRuntime {
           arguments: typeof tc.arguments === 'string'
             ? JSON.parse(tc.arguments) as Record<string, unknown>
             : tc.arguments as unknown as Record<string, unknown>,
+          ...(tc.providerMetadata ? { providerMetadata: tc.providerMetadata } : {}),
         })),
       };
     }
