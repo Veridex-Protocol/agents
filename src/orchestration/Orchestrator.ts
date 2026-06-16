@@ -165,6 +165,13 @@ export class Orchestrator {
     maxConcurrency: number,
   ): Promise<void> {
     while (true) {
+      // Move any pending tasks that already have a pre-assigned agent to 'assigned' status
+      for (const t of this.graph.getByStatus('pending')) {
+        if (t.assigneeId) {
+          this.graph.assign(t.id, t.assigneeId);
+        }
+      }
+
       // Auto-assign unassigned pending tasks
       this.scheduler.autoAssign(this.graph, members);
 

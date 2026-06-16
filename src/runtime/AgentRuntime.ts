@@ -393,6 +393,7 @@ export class AgentRuntime {
         },
         registerTool: (tool) => {
           this.tools.register(tool);
+          this.executionSurface.registerTool(tool);
         },
         registerHook: (hook) => {
           this.hooks.register(hook);
