@@ -133,6 +133,13 @@ export interface RuntimeOptions {
   veridexSDK?: unknown;
   /** Veridex AgentWallet instance (optional — enables payment features) */
   agentWallet?: unknown;
+  /**
+   * Scoped delegation mandate this runtime executes under. Set automatically by
+   * {@link createSubagentTools} when delegation enforcement is enabled, so a
+   * child (sub)agent inherits an attenuated, signed authority bounded by its
+   * parent's — closing the cross-agent confused-deputy gap.
+   */
+  mandate?: import('../credentials/MandateCredential').MandateCredential;
   /** Custom model providers to register */
   modelProviders?: Record<string, unknown>;
   /** Whether to enable trace event logging (default: true) */

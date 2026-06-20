@@ -448,6 +448,15 @@ export type {
 
 // ── Credentials ──
 export { buildMandateCredential, verifyMandateCredential, RevocationRegistry } from './credentials';
+export {
+  DelegationGuard,
+  HmacMandateSigner,
+  attenuateMandate,
+  signMandate,
+  verifyMandateSignature,
+  canonicalMandatePayload,
+  DelegationError,
+} from './credentials';
 export type {
   VCProof,
   VerifiableCredential,
@@ -459,6 +468,12 @@ export type {
   MandateCredential,
   BuildMandateParams,
   MandateVerificationResult,
+  MandateSigner,
+  MandateVerifier,
+  AttenuateMandateParams,
+  DelegationGuardOptions,
+  DelegationRequest,
+  DelegationDecision,
 } from './credentials';
 
 // ── Recovery (VA-DAR) ──

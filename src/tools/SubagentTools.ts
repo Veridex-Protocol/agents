@@ -19,6 +19,8 @@
 import { z } from 'zod';
 import type { ToolContract, ToolResult } from '../types/tools';
 import type { AgentDefinition, RuntimeOptions } from '../types/agent';
+import type { MandateCredential } from '../credentials/MandateCredential';
+import type { DelegationGuard, DelegationRequest } from '../credentials/DelegationGuard';
 import { tool } from './tool';
 
 // ── Types ──
@@ -67,6 +69,43 @@ export interface SubagentToolsOptions {
     agentId: string;
     turnIndex: number;
   };
+  /**
+   * Optional confused-deputy enforcement at the delegation boundary.
+   *
+   * When provided, every `delegate_task` call must first be authorized by the
+   * {@link DelegationGuard}: the parent mandate is cryptographically verified,
+   * the requested scope is attenuated against it (a child can never exceed the
+   * parent's authority), delegation depth is enforced, and a freshly signed,
+   * short-lived child mandate is minted and handed to the subagent runtime via
+   * {@link RuntimeOptions.mandate}. If authorization fails, delegation is
+   * **denied** and the subagent never runs.
+   */
+  delegation?: DelegationEnforcement;
+}
+
+/** Confused-deputy enforcement configuration for {@link createSubagentTools}. */
+export interface DelegationEnforcement {
+  /** Guard that verifies + attenuates the mandate on each delegation. */
+  guard: DelegationGuard;
+  /** The delegating (parent) agent's signed mandate. */
+  parentMandate: MandateCredential;
+  /** Issuer DID/identifier stamped on issued child mandates. */
+  issuer: string;
+  /**
+   * Resolve the scope and concrete action requested for a specific subagent
+   * delegation. The returned scope is *requested* — the guard still attenuates
+   * it against the parent mandate, so it can only narrow authority.
+   */
+  scopeFor?: (
+    entry: SubagentEntry,
+    input: { task: string; context?: string },
+  ) => {
+    requestedScope?: DelegationRequest['requestedScope'];
+    action?: DelegationRequest['action'];
+    ttlMs?: number;
+  };
+  /** Generate the id for an issued child mandate (default: random UUID urn). */
+  mandateId?: () => string;
 }
 
 // ── Default executor ──
@@ -132,6 +171,7 @@ export function createSubagentTools(
     executor = defaultExecutor,
     timeout = 120_000,
     parentContext,
+    delegation,
   } = options;
 
   const agentNames = agents.map((a) => a.name);
@@ -189,6 +229,31 @@ export function createSubagentTools(
       };
       if (parentContext) {
         runtimeOptions.enableTracing = true;
+      }
+
+      // Confused-deputy enforcement: verify the parent mandate and mint a
+      // scoped, attenuated child mandate before the subagent is allowed to run.
+      if (delegation) {
+        const scope = delegation.scopeFor?.(entry, { task, context });
+        const decision = await delegation.guard.authorizeDelegation({
+          parentMandate: delegation.parentMandate,
+          delegateAgentId: entry.definition.id ?? entry.name,
+          purpose: `delegate_task:${agent}`,
+          childMandateId: delegation.mandateId?.() ?? `urn:uuid:${crypto.randomUUID()}`,
+          issuer: delegation.issuer,
+          requestedScope: scope?.requestedScope,
+          action: scope?.action,
+          ttlMs: scope?.ttlMs,
+        });
+        if (!decision.allowed) {
+          return {
+            llmOutput: `Delegation to "${agent}" was denied by the authority layer: ${decision.reasons.join('; ')}`,
+            success: false,
+            error: `delegation_denied: ${decision.reasons.join('; ')}`,
+          };
+        }
+        // The subagent runs under the attenuated, signed child mandate.
+        runtimeOptions.mandate = decision.childMandate;
       }
 
       try {
