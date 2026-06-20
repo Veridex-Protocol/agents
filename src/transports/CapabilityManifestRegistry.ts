@@ -135,7 +135,7 @@ export class CapabilityManifestRegistry {
     for (let i = 0; i < len; i++) {
       const an = parseInt(ap[i] ?? '0', 10);
       const bn = parseInt(bp[i] ?? '0', 10);
-      if (isNaN(an) || isNaN(bn)) {
+      if (Number.isNaN(an) || Number.isNaN(bn)) {
         const cmp = (ap[i] ?? '').localeCompare(bp[i] ?? '');
         if (cmp !== 0) return cmp;
       } else if (an !== bn) {

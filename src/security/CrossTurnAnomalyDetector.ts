@@ -351,7 +351,7 @@ export function crossTurnAnomalyPack(opts?: CrossTurnAnomalyPackOptions): Securi
     name: 'security:cross-turn-anomaly',
     phase: 'beforeToolExecute',
     priority: 6,
-    execute(ctx: unknown): HookResult | void {
+    execute(ctx: unknown): HookResult | undefined {
       const hookCtx = ctx as {
         runId?: string;
         agentId?: string;

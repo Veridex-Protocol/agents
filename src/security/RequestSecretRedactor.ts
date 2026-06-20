@@ -332,7 +332,7 @@ export function requestSecretRedactionPack(opts?: RequestRedactionPackOptions): 
     name: 'security:request-secret-redaction',
     phase: 'beforeModelCall',
     priority: 1, // Runs first — before any other beforeModelCall hook
-    execute(ctx: unknown): HookResult | void {
+    execute(ctx: unknown): HookResult | undefined {
       const hookCtx = ctx as {
         messages?: Array<{ role: string; content?: string; [key: string]: unknown }>;
         tools?: string;

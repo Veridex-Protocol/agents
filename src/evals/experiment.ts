@@ -17,7 +17,7 @@
  */
 
 import type { AgentDefinition } from '../types/agent';
-import type { EvalScenario, EvalSplit, SplitResult, CaseOutcome } from './types';
+import type { EvalScenario, SplitResult, CaseOutcome } from './types';
 import { runSplit, validateSplitBalance } from './runner';
 import type { HarnessVariant } from './surfaces';
 import { buildVariantFromDef, applyVariant, diffVariants } from './surfaces';

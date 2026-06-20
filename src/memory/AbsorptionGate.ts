@@ -336,7 +336,7 @@ export class CompositeAbsorptionGate implements AbsorptionGate {
     const escalateIdx: number[] = [];
     const escalateCandidates: AbsorptionCandidate[] = [];
     for (let i = 0; i < primary.length; i++) {
-      if (primary[i]!.verdict === 'escalate') {
+      if (primary[i]?.verdict === 'escalate') {
         escalateIdx.push(i);
         escalateCandidates.push(candidates[i]!);
       }
@@ -349,9 +349,9 @@ export class CompositeAbsorptionGate implements AbsorptionGate {
       const inner = escalated[k]!;
       out[i] = {
         ...inner,
-        candidateId: out[i]!.candidateId,
-        judge: `${out[i]!.judge}->${inner.judge}`,
-        reason: `${out[i]!.reason} | escalated: ${inner.reason}`,
+        candidateId: out[i]?.candidateId,
+        judge: `${out[i]?.judge}->${inner.judge}`,
+        reason: `${out[i]?.reason} | escalated: ${inner.reason}`,
       };
     }
     return out;

@@ -127,7 +127,7 @@ export function renderSkillDetail(skill: SkillContract): string {
   const parts: string[] = [
     `Skill: ${fm.id}${fm.name && fm.name !== fm.id ? ` (${fm.name})` : ''}`,
     `Kind: ${fm.kind ?? 'generic'}`,
-    fm.tags && fm.tags.length ? `Tags: ${fm.tags.join(', ')}` : null,
+    fm.tags?.length ? `Tags: ${fm.tags.join(', ')}` : null,
     fm.version ? `Version: ${fm.version}` : null,
     fm.packId ? `Pack: ${fm.packId}` : null,
     '',
@@ -136,16 +136,16 @@ export function renderSkillDetail(skill: SkillContract): string {
     skill.body || '(empty body)',
   ].filter((p): p is string => p !== null);
 
-  if (skill.scripts && skill.scripts.length) {
+  if (skill.scripts?.length) {
     parts.push('', 'Scripts:');
     for (const s of skill.scripts) {
-      parts.push(`  - ${s.name} (${s.path})${s.description ? ' — ' + s.description : ''}`);
+      parts.push(`  - ${s.name} (${s.path})${s.description ? ` — ${s.description}` : ''}`);
     }
   }
-  if (skill.tools && skill.tools.length) {
+  if (skill.tools?.length) {
     parts.push('', 'Tools:');
     for (const t of skill.tools) {
-      parts.push(`  - ${t.name}${t.description ? ' — ' + t.description : ''}`);
+      parts.push(`  - ${t.name}${t.description ? ` — ${t.description}` : ''}`);
     }
   }
   return parts.join('\n');

@@ -18,7 +18,7 @@
  * 4. Alerts immediately when a canary is detected in use
  */
 
-import { randomBytes, createHash } from 'crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import type { RuntimeHook, HookResult, ToolHookContext } from '../types/hooks';
 import type { SecurityPolicyPack } from './types';
 
@@ -272,7 +272,7 @@ export function canaryCredentialPack(opts?: CanaryDeploymentPackOptions): Securi
     name: 'security:canary-before-tool',
     phase: 'beforeToolExecute',
     priority: 3,
-    execute(ctx: unknown): HookResult | void {
+    execute(ctx: unknown): HookResult | undefined {
       const hookCtx = ctx as ToolHookContext;
       if (!hookCtx.toolInput) return;
 
@@ -317,7 +317,7 @@ export function canaryCredentialPack(opts?: CanaryDeploymentPackOptions): Securi
     name: 'security:canary-after-tool',
     phase: 'afterToolExecute',
     priority: 3,
-    execute(ctx: unknown): HookResult | void {
+    execute(ctx: unknown): HookResult | undefined {
       const hookCtx = ctx as ToolHookContext;
       if (!hookCtx.toolOutput) return;
 
@@ -349,7 +349,7 @@ export function canaryCredentialPack(opts?: CanaryDeploymentPackOptions): Securi
     name: 'security:canary-after-model',
     phase: 'afterModelCall',
     priority: 3,
-    execute(ctx: unknown): HookResult | void {
+    execute(ctx: unknown): HookResult | undefined {
       const hookCtx = ctx as {
         response?: { content?: string };
       };

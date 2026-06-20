@@ -105,9 +105,9 @@ export function contextTruncationScenario(overrides?: ScenarioOverrides): Contex
     category: 'context',
     tags: ['context', 'truncation'],
     sections: [
-      { source: 'system', content: 'System prompt: ' + longContent, priority: 100 },
-      { source: 'instructions', content: 'Instructions: ' + longContent, priority: 90 },
-      { source: 'custom', content: 'Extra detail: ' + longContent, priority: 10 },
+      { source: 'system', content: `System prompt: ${longContent}`, priority: 100 },
+      { source: 'instructions', content: `Instructions: ${longContent}`, priority: 90 },
+      { source: 'custom', content: `Extra detail: ${longContent}`, priority: 10 },
     ],
     maxTokens: 250, // Enough for ~2 sections only
     expected: {

@@ -225,7 +225,7 @@ export function shellInstallGatePack(opts?: ShellInstallGateOptions): SecurityPo
     if (allowedDomains.has(domain)) return true;
     // Check if it's a subdomain of an allowed domain
     for (const allowed of allowedDomains) {
-      if (domain.endsWith('.' + allowed)) return true;
+      if (domain.endsWith(`.${allowed}`)) return true;
     }
     return false;
   }
@@ -357,7 +357,7 @@ export function shellInstallGatePack(opts?: ShellInstallGateOptions): SecurityPo
     name: 'security:shell-install-gate-hook',
     phase: 'beforeToolExecute',
     priority: 5,
-    execute(ctx: unknown): HookResult | void {
+    execute(ctx: unknown): HookResult | undefined {
       const hookCtx = ctx as ToolHookContext;
       if (!hookCtx.toolName || !shellToolNames.has(hookCtx.toolName)) return;
 

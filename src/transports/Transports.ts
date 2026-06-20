@@ -583,7 +583,6 @@ export class A2ATransport implements Transport {
 
         return payload as unknown as A2AAgentCard;
       } catch {
-        continue;
       }
     }
 

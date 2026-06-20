@@ -74,12 +74,12 @@ export function compileToolDescription(
 
   if (guidance.whenToUse && guidance.whenToUse.length > 0) {
     parts.push(
-      'Use when:\n' + guidance.whenToUse.map((b) => `  - ${b.trim()}`).join('\n'),
+      `Use when:\n${guidance.whenToUse.map((b) => `  - ${b.trim()}`).join('\n')}`,
     );
   }
   if (guidance.whenNotToUse && guidance.whenNotToUse.length > 0) {
     parts.push(
-      'Do NOT use when:\n' + guidance.whenNotToUse.map((b) => `  - ${b.trim()}`).join('\n'),
+      `Do NOT use when:\n${guidance.whenNotToUse.map((b) => `  - ${b.trim()}`).join('\n')}`,
     );
   }
   if (guidance.successExample) {

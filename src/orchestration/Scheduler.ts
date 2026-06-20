@@ -83,7 +83,7 @@ export class Scheduler {
     members: TeamMember[],
   ): TeamMember | undefined {
     // Check task metadata for required capabilities
-    const required = task.metadata?.['requiredCapabilities'] as string[] | undefined;
+    const required = task.metadata?.requiredCapabilities as string[] | undefined;
 
     if (required && required.length > 0) {
       const matched = members.filter((m) =>

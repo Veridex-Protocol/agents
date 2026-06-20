@@ -112,7 +112,7 @@ export class HybridRetriever {
       }
       if (modes.includes('temporal')) {
         const age = Math.max(0, now - entry.lastAccessedAt);
-        components.temporal = Math.pow(0.5, age / halfLifeMs);
+        components.temporal = 0.5 ** (age / halfLifeMs);
       }
       if (modes.includes('graph')) {
         const distance = graphDistances.get(entry.id);

@@ -126,7 +126,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
       }
 
       if (isStreaming) {
-        return this.handleStream(res, options!.onToken!);
+        return this.handleStream(res, options?.onToken!);
       }
 
       return this.handleResponse(await res.json() as Record<string, unknown>);

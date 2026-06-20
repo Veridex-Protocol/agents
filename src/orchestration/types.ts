@@ -8,7 +8,7 @@
  * multiple AgentRuntime instances.
  */
 
-import type { AgentDefinition, HandoffExecutionResult, RuntimeOptions } from '../types/agent';
+import type { AgentDefinition, RuntimeOptions } from '../types/agent';
 import type { RunResult } from '../types/runtime';
 
 // ── Task Types ──

@@ -22,7 +22,6 @@ import {
   BenignOverride,
   DEFAULT_FINANCIAL_BLOCKLIST,
   type IntentContext,
-  type IntentCheckResult,
 } from '../intent/IntentVerification';
 
 // ── Types ──
@@ -162,13 +161,13 @@ export function intentVerificationPack(opts?: IntentVerificationPackOptions): Se
       }
 
       for (const tc of ctx.proposal.toolCalls) {
-        const safetyClass = (ctx.metadata?.['toolSafetyClasses'] as Record<string, string>)?.[tc.name] ?? 'unknown';
+        const safetyClass = (ctx.metadata?.toolSafetyClasses as Record<string, string>)?.[tc.name] ?? 'unknown';
         if (!shouldGate(tc.name, safetyClass)) continue;
 
         const intentCtx = buildIntentContext(
           tc.name,
           tc.arguments,
-          (ctx.metadata?.['agentId'] as string) ?? 'unknown',
+          (ctx.metadata?.agentId as string) ?? 'unknown',
         );
 
         // Run keyword filter (synchronous)
@@ -203,7 +202,7 @@ export function intentVerificationPack(opts?: IntentVerificationPackOptions): Se
     name: 'security:intent-verification-hook',
     phase: 'beforeToolExecute',
     priority: 8,
-    execute(ctx: unknown): HookResult | void {
+    execute(ctx: unknown): HookResult | undefined {
       const hookCtx = ctx as ToolHookContext;
       if (!hookCtx.toolName) return;
 

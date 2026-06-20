@@ -13,7 +13,7 @@
  * Integrates as an afterModelCall hook in the security pack system.
  */
 
-import { createHash } from 'crypto';
+import { createHash } from 'node:crypto';
 import type { RuntimeHook, HookResult } from '../types/hooks';
 import type { SecurityPolicyPack } from './types';
 
@@ -192,7 +192,7 @@ export function responseHashLoggingPack(opts?: ResponseHashPackOptions): Securit
     name: 'security:response-hash-logging',
     phase: 'afterModelCall',
     priority: 1, // Run first in afterModelCall — before any other post-processing
-    execute(ctx: unknown): HookResult | void {
+    execute(ctx: unknown): HookResult | undefined {
       const hookCtx = ctx as {
         runId?: string;
         agentId?: string;

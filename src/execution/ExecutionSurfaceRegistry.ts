@@ -8,7 +8,7 @@
 import type { ExecutableCapability, ExecutionSurfaceSummary } from '../types/execution';
 import type { ToolContract } from '../types/tools';
 
-const CAPABILITY_SOURCES: Array<ExecutableCapability['source']> = [
+const _CAPABILITY_SOURCES: Array<ExecutableCapability['source']> = [
   'local_tool',
   'mcp',
   'a2a',

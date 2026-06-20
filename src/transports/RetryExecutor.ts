@@ -90,7 +90,7 @@ export class RetryExecutor {
 
         // Exponential backoff with optional jitter
         const baseDelay = Math.min(
-          this.retry.backoffMs * Math.pow(this.retry.backoffMultiplier, attempt - 1),
+          this.retry.backoffMs * this.retry.backoffMultiplier ** (attempt - 1),
           this.retry.maxBackoffMs,
         );
         const delay = this.retry.jitter

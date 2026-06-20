@@ -224,7 +224,7 @@ export function createFilesystemTools(
     async execute({ input }): Promise<ToolResult> {
       try {
         // Check blocked extensions
-        const ext = input.path.includes('.') ? '.' + input.path.split('.').pop() : '';
+        const ext = input.path.includes('.') ? `.${input.path.split('.').pop()}` : '';
         if (blockedExtensions.includes(ext)) {
           return {
             llmOutput: `Blocked file extension: ${ext}`,

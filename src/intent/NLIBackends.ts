@@ -172,14 +172,12 @@ function cosine(a: ReadonlyArray<number>, b: ReadonlyArray<number>): number {
  * and most self-hosted gateways. Bring your own client; we only need this
  * single-method adapter so we don't hard-depend on any SDK.
  */
-export interface ChatCompletionFn {
-  (input: {
+export type ChatCompletionFn = (input: {
     system: string;
     user: string;
     /** Abort after this many ms. Caller may wire to AbortController. */
     timeoutMs?: number;
-  }): Promise<string>;
-}
+  }) => Promise<string>
 
 export interface LLMJudgeConfig {
   chat: ChatCompletionFn;

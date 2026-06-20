@@ -130,9 +130,9 @@ export function injectionDetectionPack(opts?: InjectionDetectionPackOptions): Se
         }
       }
       if (ctx.metadata) {
-        const prompt = ctx.metadata['prompt'] as string | undefined;
+        const prompt = ctx.metadata.prompt as string | undefined;
         if (prompt) inputs.push(prompt);
-        const llmOutput = ctx.metadata['llmOutput'] as string | undefined;
+        const llmOutput = ctx.metadata.llmOutput as string | undefined;
         if (llmOutput) inputs.push(llmOutput);
       }
       if (inputs.length === 0) {
@@ -168,7 +168,7 @@ export function injectionDetectionPack(opts?: InjectionDetectionPackOptions): Se
     name: 'security:injection-beforeModelCall',
     phase: 'beforeModelCall',
     priority: 5,
-    execute(ctx: unknown): HookResult | void {
+    execute(ctx: unknown): HookResult | undefined {
       const hookCtx = ctx as { input?: string; prompt?: string };
       const text = hookCtx.input ?? hookCtx.prompt ?? '';
       if (!text) return;
@@ -263,7 +263,7 @@ export function toolPoisoningPack(opts?: ToolPoisoningPackOptions): SecurityPoli
     name: 'security:tool-poisoning-validation',
     phase: 'beforeToolValidation',
     priority: 5,
-    execute(ctx: unknown): HookResult | void {
+    execute(ctx: unknown): HookResult | undefined {
       if (!autoSanitize) return;
       const hookCtx = ctx as { toolName?: string; toolDescription?: string };
       if (!hookCtx.toolDescription) return;
@@ -285,7 +285,7 @@ export function toolPoisoningPack(opts?: ToolPoisoningPackOptions): SecurityPoli
     name: 'security:tool-poisoning-pincheck',
     phase: 'beforeToolExecute',
     priority: 5,
-    execute(ctx: unknown): HookResult | void {
+    execute(ctx: unknown): HookResult | undefined {
       const hookCtx = ctx as ToolHookContext & { toolDescription?: string };
       const toolName = hookCtx.toolName;
       const description = hookCtx.toolDescription;
@@ -402,7 +402,7 @@ export function handoffSafetyPack(opts?: HandoffSafetyPackOptions): SecurityPoli
     name: 'security:handoff-safety-hook',
     phase: 'beforeHandoff',
     priority: 10,
-    execute(ctx: unknown): HookResult | void {
+    execute(ctx: unknown): HookResult | undefined {
       const hookCtx = ctx as { targetAgentId?: string };
       const target = hookCtx.targetAgentId;
       if (!target) return;
@@ -456,7 +456,7 @@ export function modelRestrictionPack(opts?: ModelRestrictionPackOptions): Securi
     name: 'security:model-restriction-hook',
     phase: 'beforeModelCall',
     priority: 10,
-    execute(ctx: unknown): HookResult | void {
+    execute(ctx: unknown): HookResult | undefined {
       const hookCtx = ctx as { model?: string; provider?: string };
       const model = hookCtx.model?.toLowerCase();
       const provider = hookCtx.provider?.toLowerCase();
@@ -661,7 +661,7 @@ export function endpointAllowlistPack(opts: EndpointAllowlistPackOptions): Secur
     name: 'security:endpoint-allowlist-hook',
     phase: 'beforeToolExecute',
     priority: 10,
-    execute(ctx: unknown): HookResult | void {
+    execute(ctx: unknown): HookResult | undefined {
       const hookCtx = ctx as ToolHookContext;
       const endpoint = hookCtx.toolInput?.endpoint as string | undefined
         ?? hookCtx.toolInput?.url as string | undefined;

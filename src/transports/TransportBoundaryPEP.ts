@@ -165,7 +165,7 @@ export class TransportBoundaryPEP {
     const endpointConstraint = resolveConstraints(allConstraints, 'allowed_endpoints');
     if (endpointConstraint && context.transport.endpoint) {
       const allowed = endpointConstraint.value as string[] | undefined;
-      if (allowed && !allowed.some((p) => context.transport.endpoint!.startsWith(p))) {
+      if (allowed && !allowed.some((p) => context.transport.endpoint?.startsWith(p))) {
         reasons.push(
           `Endpoint '${context.transport.endpoint}' not in ${endpointConstraint.level}-level allowlist`,
         );

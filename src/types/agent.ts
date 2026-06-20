@@ -8,7 +8,6 @@
  * its identity, model, tools, memory, payments, policies, and hooks.
  */
 
-import type { z } from 'zod';
 import type { ToolContract } from './tools';
 import type { ToolAttachment } from './tools';
 import type { MemoryConfig } from './memory';

@@ -466,7 +466,7 @@ export async function runEvalSuite(
       const result = results[i];
       const split = scenario.split ?? 'train';
       if (!splitMap.has(split)) splitMap.set(split, []);
-      splitMap.get(split)!.push(toCaseOutcome(scenario, result));
+      splitMap.get(split)?.push(toCaseOutcome(scenario, result));
     }
 
     splitResults = {} as Record<EvalSplit, SplitResult>;

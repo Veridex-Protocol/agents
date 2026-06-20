@@ -93,13 +93,13 @@ export function parseSkillDocument(
     id: frontmatter.id,
     frontmatter,
     body,
-    scripts: extractRefList(rawFrontmatter['scripts'], ['name', 'path']) as
+    scripts: extractRefList(rawFrontmatter.scripts, ['name', 'path']) as
       | SkillContract['scripts']
       | undefined,
-    tools: extractRefList(rawFrontmatter['tools'], ['name']) as
+    tools: extractRefList(rawFrontmatter.tools, ['name']) as
       | SkillContract['tools']
       | undefined,
-    tests: extractRefList(rawFrontmatter['tests'], ['name', 'path', 'kind']) as
+    tests: extractRefList(rawFrontmatter.tests, ['name', 'path', 'kind']) as
       | SkillContract['tests']
       | undefined,
     source,
@@ -226,7 +226,7 @@ const builtinYaml: YamlParser = {
       while (stack.length > 1 && indent <= stack[stack.length - 1].indent) {
         stack.pop();
       }
-      let top = stack[stack.length - 1];
+      const top = stack[stack.length - 1];
 
       // ── List item ───────────────────────────────────────────────────────
       if (trimmed.startsWith('- ')) {

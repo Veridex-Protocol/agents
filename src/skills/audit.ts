@@ -16,7 +16,7 @@
 
 import { SkillResolver } from './SkillResolver';
 import type { SkillResolverOptions } from './SkillResolver';
-import { SkillRegistry } from './SkillRegistry';
+import type { SkillRegistry } from './SkillRegistry';
 import type { SkillContract, SkillTrigger } from './types';
 
 // ── check-resolvable ───────────────────────────────────────────────────────

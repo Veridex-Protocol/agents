@@ -14,7 +14,6 @@
  */
 
 import { SkillRegistry } from './SkillRegistry';
-import { SkillResolver } from './SkillResolver';
 import { loadSkillPack, writeSkillArtifacts } from './SkillPack';
 import { checkResolvable } from './audit';
 import { dryAudit } from './audit';

@@ -8,11 +8,11 @@
  * trajectory that survives compaction-driven restarts.
  */
 
-import {
-  type ContinuationContext,
-  type ContinuationDecision,
-  type ContinuationStrategy,
-  type ContinuationTurnRecord,
+import type {
+  ContinuationContext,
+  ContinuationDecision,
+  ContinuationStrategy,
+  ContinuationTurnRecord,
 } from './ContinuationStrategy';
 
 /** The minimal run interface the coordinator needs. */

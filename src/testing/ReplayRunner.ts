@@ -4,7 +4,7 @@
  * Enables regression testing, trace comparison, and debug replay.
  */
 
-import type { ModelMessage, ModelResponse, ModelUsage } from '../types/models';
+import type { ModelMessage, ModelResponse, } from '../types/models';
 import type { TraceEvent } from '../types/events';
 import type { RunResult } from '../types/runtime';
 
@@ -81,7 +81,7 @@ export class ReplayProvider {
     this.interactions = interactions;
   }
 
-  async complete(messages: ModelMessage[]): Promise<ModelResponse> {
+  async complete(_messages: ModelMessage[]): Promise<ModelResponse> {
     const interaction = this.interactions[this.callIndex];
     if (!interaction) {
       throw new Error(

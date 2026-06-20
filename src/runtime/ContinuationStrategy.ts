@@ -236,5 +236,5 @@ export function defaultSummarise(input: {
 
 function truncate(s: string, n: number): string {
   const trimmed = s.trim();
-  return trimmed.length <= n ? trimmed : trimmed.slice(0, n - 1) + '…';
+  return trimmed.length <= n ? trimmed : `${trimmed.slice(0, n - 1)}…`;
 }

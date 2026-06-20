@@ -11,7 +11,7 @@
  * ```
  */
 
-import { OpenAICompatibleProvider, type OpenAICompatibleConfig } from './OpenAICompatibleProvider';
+import { OpenAICompatibleProvider, } from './OpenAICompatibleProvider';
 
 export interface XAIProviderConfig {
   /** API key. Falls back to XAI_API_KEY env var. */

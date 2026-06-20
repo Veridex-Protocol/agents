@@ -45,10 +45,8 @@ import type { TranscriptEntry } from '../types/transcript';
 import type { RuntimeBootstrapReport } from '../types/bootstrap';
 import type {
   ActorRef,
-  ExecutionGraph,
   ExecutionGraphStore,
   ExecutionNode,
-  ExecutionNodeKind,
   IdempotencyKey,
   MemoryProposal,
   MemoryProposalValidationResult,
@@ -95,7 +93,6 @@ import {
 import { CoreAdapter } from '../integrations/CoreAdapter';
 import { PaymentsAdapter } from '../integrations/PaymentsAdapter';
 import { WorkspaceStateAdapter } from '../integrations/WorkspaceStateAdapter';
-import type { WorkspaceStateProvider } from '../integrations/WorkspaceStateAdapter';
 import { PolicyEngine } from '../policy';
 import { ApprovalManager } from '../approvals';
 import { AuditEmitter } from '../audit';
@@ -111,8 +108,7 @@ import type { HookRunResult } from '../hooks/HookRunner';
 import type { TranscriptStore } from '../types/transcript';
 import type { AgentIdentityClaims, AgentIntegrityBinding, ResponseEnvelope } from '../types/identity';
 import { buildIntegrityBinding, buildResponseEnvelope } from '../models/integrity';
-import type { ResponseEnvelopeParams } from '../models/integrity';
-import type { IntentVerifier, IntentVerdict } from '../intent/IntentVerification';
+import type { IntentVerifier, } from '../intent/IntentVerification';
 import {
   type LLMResponseGuard,
   type SupplyChainGuard,
@@ -3565,7 +3561,6 @@ export class AgentRuntime {
           action: proposal.action,
           riskScore: proposal.riskScore,
         };
-      case 'final_answer':
       default:
         return {};
     }

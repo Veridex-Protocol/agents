@@ -15,9 +15,9 @@
  */
 
 import { createHash } from 'crypto';
-import { appendFile, readFile, stat, mkdir } from 'fs/promises';
-import { dirname, join } from 'path';
-import type { RuntimeHook, HookResult } from '../types/hooks';
+import { appendFile, readFile, mkdir } from 'fs/promises';
+import { join } from 'path';
+import type { RuntimeHook } from '../types/hooks';
 import type { SecurityPolicyPack } from './types';
 
 // ── Types ──

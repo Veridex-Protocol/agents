@@ -31,7 +31,7 @@ export function summariseToolForCatalog(contract: ToolContract): string {
   if (explicit) return explicit;
   const firstLine = (contract.description ?? '').split('\n', 1)[0]?.trim() ?? '';
   if (firstLine.length <= 120) return firstLine;
-  return firstLine.slice(0, 117) + '...';
+  return `${firstLine.slice(0, 117)}...`;
 }
 
 /**

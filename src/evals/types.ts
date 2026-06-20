@@ -5,7 +5,7 @@
  * across policy, context assembly, transport, memory, and security.
  */
 
-import type { PolicyVerdict, PolicyCheckResult } from '../types/policy';
+import type { PolicyVerdict, } from '../types/policy';
 import type { ActionProposal } from '../types/proposals';
 
 // ── Scenario Status ──

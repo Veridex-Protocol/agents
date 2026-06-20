@@ -295,7 +295,7 @@ export class MemoryLifecycle {
       if (e.tier === 'procedural') continue;
       const ageMs = now - e.lastAccessedAt;
       if (ageMs <= 0) continue;
-      const factor = Math.pow(0.5, ageMs / half);
+      const factor = 0.5 ** (ageMs / half);
       const next = Math.max(0, e.confidence * factor);
       if (next < this.decayOpts.floor) {
         if (this.graph) await this.graph.removeNode(e.id);

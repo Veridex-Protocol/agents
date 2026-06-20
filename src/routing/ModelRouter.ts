@@ -360,7 +360,7 @@ export class ModelRouter {
     if (c.vendor !== undefined && model.hints.vendor !== c.vendor) {
       return 'vendor_mismatch';
     }
-    if (c.excludeVendors && c.excludeVendors.includes(model.hints.vendor)) {
+    if (c.excludeVendors?.includes(model.hints.vendor)) {
       return 'vendor_excluded';
     }
     if (c.requiredCapabilities) {

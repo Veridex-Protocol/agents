@@ -5,7 +5,7 @@
  * Lightweight transcript stores for local replay and checkpoint restore.
  */
 
-import { mkdir, readFile, readdir, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type {

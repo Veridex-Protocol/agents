@@ -46,7 +46,7 @@ export function eventToSSE(event: TraceEvent): string {
 export function streamToSSE(
   events: AsyncIterable<TraceEvent>,
 ): ReadableStream<string> {
-  const encoder = new TextEncoder();
+  const _encoder = new TextEncoder();
 
   return new ReadableStream({
     async start(controller) {

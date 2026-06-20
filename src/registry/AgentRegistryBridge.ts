@@ -64,7 +64,7 @@ export class AgentRegistryBridge {
   private get headers(): Record<string, string> {
     const h: Record<string, string> = { 'Content-Type': 'application/json' };
     if (this.config.authToken) {
-      h['Authorization'] = `Bearer ${this.config.authToken}`;
+      h.Authorization = `Bearer ${this.config.authToken}`;
     }
     h['x-api-key'] = this.config.apiKey;
     return h;

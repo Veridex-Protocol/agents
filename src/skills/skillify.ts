@@ -201,7 +201,7 @@ function renderSkillMd(input: Required<Pick<SkillifyInput, 'kind' | 'tags'>> & S
 
 function quote(s: string): string {
   // Single-quote if it contains anything special.
-  if (/[:#"'\[\]\{\},&*!|>%@`]/.test(s) || /^\s|\s$/.test(s)) {
+  if (/[:#"'[\]{},&*!|>%@`]/.test(s) || /^\s|\s$/.test(s)) {
     return `'${s.replace(/'/g, "''")}'`;
   }
   return s;
@@ -321,7 +321,7 @@ function renderBrainFile(input: SkillifyInput): string {
 
 - **Created**: ${new Date().toISOString()}
 ${input.author ? `- **Author**: ${input.author}\n` : ''}- **Description**: ${input.description}
-${input.failureTrace ? '\n## Originating failure\n\n```\n' + input.failureTrace.trim() + '\n```\n' : ''}
+${input.failureTrace ? `\n## Originating failure\n\n\`\`\`\n${input.failureTrace.trim()}\n\`\`\`\n` : ''}
 ## Resolution
 
 Triggers + deterministic script + tests now guard against the original failure. Update this file when the skill evolves.

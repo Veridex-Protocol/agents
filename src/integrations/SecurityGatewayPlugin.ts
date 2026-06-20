@@ -142,7 +142,7 @@ export function securityGatewayPlugin(
             timestamp: Date.now(),
           };
 
-          const result = await gateway!.evaluate(evalCtx);
+          const result = await gateway?.evaluate(evalCtx);
           return {
             ruleId: 'veridex.security-gateway:bridge',
             ruleName: 'Security Gateway Bridge',

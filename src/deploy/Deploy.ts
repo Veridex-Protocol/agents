@@ -190,7 +190,7 @@ export function buildDeployBundle(spec: DeploySpec): DeployBundle {
 
 export function renderManifest(spec: DeploySpec): string {
   return (
-    JSON.stringify(
+    `${JSON.stringify(
       {
         kind: 'veridex.deploy/v1',
         id: spec.id,
@@ -215,7 +215,7 @@ export function renderManifest(spec: DeploySpec): string {
       },
       null,
       2,
-    ) + '\n'
+    )}\n`
   );
 }
 
@@ -244,7 +244,7 @@ export function renderDockerfile(spec: DeploySpec): string {
     `  CMD wget -qO- http://127.0.0.1:${port}/healthz || exit 1`,
     `CMD ["node", "${spec.entrypoint}"]`,
   ];
-  return lines.join('\n') + '\n';
+  return `${lines.join('\n')}\n`;
 }
 
 export function renderK8sManifest(spec: DeploySpec): string {
@@ -349,19 +349,19 @@ function renderResources(r: ResourceSpec | undefined): string {
 
 export function renderMcpConfig(spec: DeploySpec): string {
   return (
-    JSON.stringify(
+    `${JSON.stringify(
       {
         servers: spec.mcpServers ?? [],
       },
       null,
       2,
-    ) + '\n'
+    )}\n`
   );
 }
 
 export function renderPolicyConfig(spec: DeploySpec): string {
   return (
-    JSON.stringify(
+    `${JSON.stringify(
       {
         deployId: spec.id,
         sandbox: spec.sandbox ?? { backend: 'deny-all' },
@@ -369,12 +369,12 @@ export function renderPolicyConfig(spec: DeploySpec): string {
       },
       null,
       2,
-    ) + '\n'
+    )}\n`
   );
 }
 
 export function renderDockerignore(): string {
-  return [
+  return `${[
     'node_modules',
     'dist',
     '.git',
@@ -385,7 +385,7 @@ export function renderDockerignore(): string {
     '*.spec.ts',
     'coverage',
     '.DS_Store',
-  ].join('\n') + '\n';
+  ].join('\n')}\n`;
 }
 
 function renderReadme(spec: DeploySpec): string {
@@ -495,7 +495,7 @@ export async function runDeployCli(
   const [cmd, ...rest] = argv;
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
     log(HELP_TEXT);
-    return { exitCode: 0, stdout: out.join('\n') + '\n', stderr: '' };
+    return { exitCode: 0, stdout: `${out.join('\n')}\n`, stderr: '' };
   }
 
   try {
@@ -509,11 +509,11 @@ export async function runDeployCli(
       default:
         warn(`Unknown command: ${cmd}`);
         warn(HELP_TEXT);
-        return { exitCode: 2, stdout: '', stderr: err.join('\n') + '\n' };
+        return { exitCode: 2, stdout: '', stderr: `${err.join('\n')}\n` };
     }
   } catch (e) {
     warn(`Error: ${e instanceof Error ? e.message : String(e)}`);
-    return { exitCode: 1, stdout: out.join('\n'), stderr: err.join('\n') + '\n' };
+    return { exitCode: 1, stdout: out.join('\n'), stderr: `${err.join('\n')}\n` };
   }
 }
 
@@ -609,7 +609,7 @@ async function cmdBundle(
   ];
   for (const a of bundle.artifacts) lines.push(`    - ${a.path}`);
   log(lines.join('\n'));
-  return { exitCode: 0, stdout: lines.join('\n') + '\n', stderr: '' };
+  return { exitCode: 0, stdout: `${lines.join('\n')}\n`, stderr: '' };
 }
 
 async function cmdDeploy(
@@ -648,7 +648,7 @@ async function cmdDeploy(
       warn('--register requires a configured registrar');
       return {
         exitCode: 2,
-        stdout: outLines.join('\n') + '\n',
+        stdout: `${outLines.join('\n')}\n`,
         stderr: '--register requires a configured registrar\n',
       };
     }
@@ -660,5 +660,5 @@ async function cmdDeploy(
     outLines.push(`Registered: ${deploymentId}`, `  url: ${url}`);
   }
   log(outLines.join('\n'));
-  return { exitCode: 0, stdout: outLines.join('\n') + '\n', stderr: '' };
+  return { exitCode: 0, stdout: `${outLines.join('\n')}\n`, stderr: '' };
 }

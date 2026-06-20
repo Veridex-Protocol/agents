@@ -18,8 +18,6 @@
 
 import type { RuntimePlugin, RuntimePluginContext } from '../runtime/RuntimePlugin';
 import type {
-  LLMResponseGuard,
-  SupplyChainGuard,
   GuardToolCallProposal,
   LLMResponseValidation,
   SupplyChainCheck,

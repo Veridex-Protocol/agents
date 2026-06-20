@@ -228,7 +228,7 @@ export function verifyMandateCredential(
         constraintViolations.push(`Tool '${context.toolName}' not in allowed list`);
       }
     }
-    if (constraints.blockedTools && constraints.blockedTools.includes(context.toolName)) {
+    if (constraints.blockedTools?.includes(context.toolName)) {
       constraintViolations.push(`Tool '${context.toolName}' is explicitly blocked`);
     }
   }

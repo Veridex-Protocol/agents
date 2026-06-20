@@ -16,7 +16,7 @@
  * against known-good TLS certificates for each provider.
  */
 
-import { createHash } from 'crypto';
+import { createHash } from 'node:crypto';
 import type { RuntimeHook, HookResult } from '../types/hooks';
 import type { SecurityPolicyPack } from './types';
 
@@ -266,7 +266,7 @@ export class TLSCertPinner {
           provider,
           hostname,
           valid: false,
-          reason: `TLS certificate fingerprint mismatch for ${provider} (${hostname}). Expected one of: ${pin.certFingerprints.map((f) => f.slice(0, 16) + '...').join(', ')}`,
+          reason: `TLS certificate fingerprint mismatch for ${provider} (${hostname}). Expected one of: ${pin.certFingerprints.map((f) => `${f.slice(0, 16)}...`).join(', ')}`,
           fingerprint: normalizedFP,
         };
       }
@@ -333,7 +333,7 @@ export function tlsCertPinningPack(opts?: TLSPinningPackOptions): SecurityPolicy
     name: 'security:tls-cert-pinning',
     phase: 'beforeModelCall',
     priority: 2, // After request secret redaction (priority 1)
-    execute(ctx: unknown): HookResult | void {
+    execute(ctx: unknown): HookResult | undefined {
       const hookCtx = ctx as {
         provider?: string;
         model?: string;
