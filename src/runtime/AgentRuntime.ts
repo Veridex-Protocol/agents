@@ -29,6 +29,10 @@ import type {
 } from '../types/runtime';
 import type {
   ActionProposal,
+  ToolCallProposal,
+  MemoryWriteProposal,
+  HandoffProposal,
+  ApprovalRequestProposal,
 } from '../types/proposals';
 import type {
   ModelMessage,
@@ -1600,6 +1604,14 @@ export class AgentRuntime {
     });
 
     // Previous turns (conversation history)
+    messages.push(...this.buildHistoryMessages(run));
+
+    return { messages, contextPlan };
+  }
+
+  /** Map the most recent turns into conversation-history messages (assistant + tool results). */
+  private buildHistoryMessages(run: Run): ModelMessage[] {
+    const messages: ModelMessage[] = [];
     const historyTurns = run.turns.slice(-DEFAULT_HISTORY_TURNS);
     for (const turn of historyTurns) {
       // Assistant message
@@ -1630,8 +1642,7 @@ export class AgentRuntime {
         }
       }
     }
-
-    return { messages, contextPlan };
+    return messages;
   }
 
   /** Build tool definitions for the model. */
@@ -1761,99 +1772,70 @@ export class AgentRuntime {
     options?: ProposalExecutionOptions,
   ): Promise<unknown> {
     switch (proposal.type) {
-      case 'tool_call': {
-        for (const toolCall of proposal.toolCalls) {
-          const capability = this.executionSurface.get(toolCall.name);
-          this.emitEvent({
-            id: eventId(),
-            type: 'tool_proposed',
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            timestamp: Date.now(),
-            data: {
-              toolName: toolCall.name,
-              arguments: toolCall.arguments,
-              safetyClass: capability?.safetyClass ?? 'unknown',
-            },
-          });
-          await this.appendTranscriptEntry({
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            kind: 'tool_call',
-            content: `${toolCall.name}(${JSON.stringify(toolCall.arguments)})`,
-            metadata: {
-              source: capability?.source,
-              safetyClass: capability?.safetyClass,
-            },
-          });
-        }
+      case 'tool_call':
+        return this.executeToolCallProposal(run, turnIndex, proposal, options);
+      case 'memory_write':
+        return this.executeMemoryWriteProposal(run, turnIndex, proposal);
+      case 'final_answer':
+        return undefined;
+      case 'handoff':
+        return this.executeHandoffProposal(run, turnIndex, proposal);
+      case 'approval_request':
+        return this.executeApprovalRequestProposal(run, turnIndex, proposal);
+      default:
+        return undefined;
+    }
+  }
 
-        // ── Intent Verification (pre-policy) ──
-        if (this.intentVerifier && proposal.type === 'tool_call') {
-          let intentBlocked = false;
-          for (const tc of proposal.toolCalls) {
-            const verdict = await this.intentVerifier.verify({
-              action: `${tc.name}(${JSON.stringify(tc.arguments)})`,
-              agentId: this.definition.id,
-              target: tc.name,
-              amountUSD: typeof tc.arguments.amountUSD === 'number' ? tc.arguments.amountUSD : undefined,
-              chain: typeof tc.arguments.chain === 'string' ? tc.arguments.chain : undefined,
-            });
+  /** Execute a tool-call proposal: events, intent verification, policy, approvals, and tool execution. Extracted verbatim from the former executeProposal switch. */
+  private async executeToolCallProposal(
+    run: Run,
+    turnIndex: number,
+    proposal: ToolCallProposal,
+    options?: ProposalExecutionOptions,
+  ): Promise<unknown> {
+    for (const toolCall of proposal.toolCalls) {
+      const capability = this.executionSurface.get(toolCall.name);
+      this.emitEvent({
+        id: eventId(),
+        type: 'tool_proposed',
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        timestamp: Date.now(),
+        data: {
+          toolName: toolCall.name,
+          arguments: toolCall.arguments,
+          safetyClass: capability?.safetyClass ?? 'unknown',
+        },
+      });
+      await this.appendTranscriptEntry({
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        kind: 'tool_call',
+        content: `${toolCall.name}(${JSON.stringify(toolCall.arguments)})`,
+        metadata: {
+          source: capability?.source,
+          safetyClass: capability?.safetyClass,
+        },
+      });
+    }
 
-            if (!verdict.allowed) {
-              const blockReason = `Intent verification failed for ${tc.name}: ${verdict.reasons.join('; ')}`;
-              this.emitEvent({
-                id: eventId(),
-                type: 'policy_evaluated',
-                runId: run.id,
-                agentId: this.definition.id,
-                turnIndex,
-                timestamp: Date.now(),
-                data: {
-                  verdict: 'block',
-                  riskScore: 1.0,
-                  reasons: verdict.reasons,
-                },
-              } as TraceEvent);
+    // ── Intent Verification (pre-policy) ──
+    if (this.intentVerifier && proposal.type === 'tool_call') {
+      let intentBlocked = false;
+      for (const tc of proposal.toolCalls) {
+        const verdict = await this.intentVerifier.verify({
+          action: `${tc.name}(${JSON.stringify(tc.arguments)})`,
+          agentId: this.definition.id,
+          target: tc.name,
+          amountUSD: typeof tc.arguments.amountUSD === 'number' ? tc.arguments.amountUSD : undefined,
+          chain: typeof tc.arguments.chain === 'string' ? tc.arguments.chain : undefined,
+        });
 
-              run.policyDecisions.push({
-                verdict: 'block',
-                checks: [],
-                riskScore: 1.0,
-                reasons: [blockReason],
-                evaluatedAt: Date.now(),
-              });
-
-              run.state = 'failed';
-              intentBlocked = true;
-              break;
-            }
-          }
-          if (intentBlocked) {
-            return this.buildRunResult(run);
-          }
-        }
-
-        // ── Policy Evaluation ──
-        if (this.policyEngine.list().length > 0) {
-          const policyContext = {
-            agentId: this.definition.id,
-            runId: run.id,
-            turnIndex,
-            proposal,
-            runSpendUSD: this.payments?.getRunSpend() ?? 0,
-            totalTokens: run.totalUsage.totalTokens,
-            metadata: {
-              identityClaims: this.identityClaims ?? undefined,
-              integrityBinding: this.integrityBinding ?? undefined,
-              enforcementLevel: 'agent' as const,
-            },
-          };
-
-          const decision = await this.policyEngine.evaluate(policyContext);
-
+        if (!verdict.allowed) {
+          const blockReason = `Intent verification failed for ${tc.name}: ${verdict.reasons.join('; ')}`;
           this.emitEvent({
             id: eventId(),
             type: 'policy_evaluated',
@@ -1861,941 +1843,160 @@ export class AgentRuntime {
             agentId: this.definition.id,
             turnIndex,
             timestamp: Date.now(),
-            data: { verdict: decision.verdict, riskScore: decision.riskScore, reasons: decision.reasons },
+            data: {
+              verdict: 'block',
+              riskScore: 1.0,
+              reasons: verdict.reasons,
+            },
           } as TraceEvent);
-          await this.appendExecutionNode(run.id, {
-            turnIndex,
-            kind: 'policy_decision',
-            phase: 'policy',
-            actor: this.buildActorRef('system', 'policy-engine', 'Policy Engine'),
-            status: decision.verdict === 'block' ? 'blocked' : 'success',
-            summary: `Policy ${decision.verdict} (${decision.riskScore.toFixed(2)})`,
-            metadata: {
-              verdict: decision.verdict,
-              riskScore: decision.riskScore,
-              reasons: decision.reasons,
-            },
-          }, 'validated_by');
-          run.policyDecisions.push(decision);
-          await this.appendTranscriptEntry({
+
+          run.policyDecisions.push({
+            verdict: 'block',
+            checks: [],
+            riskScore: 1.0,
+            reasons: [blockReason],
+            evaluatedAt: Date.now(),
+          });
+
+          run.state = 'failed';
+          intentBlocked = true;
+          break;
+        }
+      }
+      if (intentBlocked) {
+        return this.buildRunResult(run);
+      }
+    }
+
+    // ── Policy Evaluation ──
+    if (this.policyEngine.list().length > 0) {
+      const policyContext = {
+        agentId: this.definition.id,
+        runId: run.id,
+        turnIndex,
+        proposal,
+        runSpendUSD: this.payments?.getRunSpend() ?? 0,
+        totalTokens: run.totalUsage.totalTokens,
+        metadata: {
+          identityClaims: this.identityClaims ?? undefined,
+          integrityBinding: this.integrityBinding ?? undefined,
+          enforcementLevel: 'agent' as const,
+        },
+      };
+
+      const decision = await this.policyEngine.evaluate(policyContext);
+
+      this.emitEvent({
+        id: eventId(),
+        type: 'policy_evaluated',
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        timestamp: Date.now(),
+        data: { verdict: decision.verdict, riskScore: decision.riskScore, reasons: decision.reasons },
+      } as TraceEvent);
+      await this.appendExecutionNode(run.id, {
+        turnIndex,
+        kind: 'policy_decision',
+        phase: 'policy',
+        actor: this.buildActorRef('system', 'policy-engine', 'Policy Engine'),
+        status: decision.verdict === 'block' ? 'blocked' : 'success',
+        summary: `Policy ${decision.verdict} (${decision.riskScore.toFixed(2)})`,
+        metadata: {
+          verdict: decision.verdict,
+          riskScore: decision.riskScore,
+          reasons: decision.reasons,
+        },
+      }, 'validated_by');
+      run.policyDecisions.push(decision);
+      await this.appendTranscriptEntry({
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        kind: 'policy_decision',
+        content: `${decision.verdict.toUpperCase()} (${decision.riskScore.toFixed(2)}): ${decision.reasons.join('; ') || 'No reasons provided'}`,
+        metadata: {
+          verdict: decision.verdict,
+          riskScore: decision.riskScore,
+          reasons: decision.reasons,
+        },
+      });
+
+      if (decision.verdict === 'block') {
+        await this.runHooks('onPolicyViolation', {
+          runId: run.id,
+          agentId: this.definition.id,
+          turnIndex,
+          proposal,
+          decision,
+        }, { runId: run.id, turnIndex });
+        return {
+          blocked: true,
+          terminalState: 'failed',
+          reasons: decision.reasons,
+          policyDecision: decision,
+        } satisfies ProposalControlResult;
+      }
+
+      if (decision.verdict === 'escalate' && !options?.approval?.approved) {
+        await this.runHooks('onPolicyViolation', {
+          runId: run.id,
+          agentId: this.definition.id,
+          turnIndex,
+          proposal,
+          decision,
+        }, { runId: run.id, turnIndex });
+
+        const beforeApproval = await this.runHooks('beforeApprovalRequest', {
+          runId: run.id,
+          agentId: this.definition.id,
+          turnIndex,
+          proposal,
+          decision,
+        }, { runId: run.id, turnIndex });
+        if (beforeApproval.override === 'deny') {
+          return {
+            blocked: true,
+            terminalState: 'failed',
+            reasons: beforeApproval.reasons,
+            policyDecision: decision,
+          } satisfies ProposalControlResult;
+        }
+
+        const started = await this.approvals.startApproval(
+          run.id,
+          this.definition.id,
+          turnIndex,
+          proposal,
+          decision,
+          { autoResolve: false },
+        );
+
+        if (!started.decision) {
+          this.emitEvent({
+            id: eventId(),
+            type: 'approval_requested',
             runId: run.id,
             agentId: this.definition.id,
             turnIndex,
-            kind: 'policy_decision',
-            content: `${decision.verdict.toUpperCase()} (${decision.riskScore.toFixed(2)}): ${decision.reasons.join('; ') || 'No reasons provided'}`,
-            metadata: {
-              verdict: decision.verdict,
+            timestamp: Date.now(),
+            data: {
+              action: 'tool_call',
+              reason: started.request.reason,
               riskScore: decision.riskScore,
-              reasons: decision.reasons,
             },
           });
-
-          if (decision.verdict === 'block') {
-            await this.runHooks('onPolicyViolation', {
-              runId: run.id,
-              agentId: this.definition.id,
-              turnIndex,
-              proposal,
-              decision,
-            }, { runId: run.id, turnIndex });
-            return {
-              blocked: true,
-              terminalState: 'failed',
-              reasons: decision.reasons,
-              policyDecision: decision,
-            } satisfies ProposalControlResult;
-          }
-
-          if (decision.verdict === 'escalate' && !options?.approval?.approved) {
-            await this.runHooks('onPolicyViolation', {
-              runId: run.id,
-              agentId: this.definition.id,
-              turnIndex,
-              proposal,
-              decision,
-            }, { runId: run.id, turnIndex });
-
-            const beforeApproval = await this.runHooks('beforeApprovalRequest', {
-              runId: run.id,
-              agentId: this.definition.id,
-              turnIndex,
-              proposal,
-              decision,
-            }, { runId: run.id, turnIndex });
-            if (beforeApproval.override === 'deny') {
-              return {
-                blocked: true,
-                terminalState: 'failed',
-                reasons: beforeApproval.reasons,
-                policyDecision: decision,
-              } satisfies ProposalControlResult;
-            }
-
-            const started = await this.approvals.startApproval(
-              run.id,
-              this.definition.id,
-              turnIndex,
-              proposal,
-              decision,
-              { autoResolve: false },
-            );
-
-            if (!started.decision) {
-              this.emitEvent({
-                id: eventId(),
-                type: 'approval_requested',
-                runId: run.id,
-                agentId: this.definition.id,
-                turnIndex,
-                timestamp: Date.now(),
-                data: {
-                  action: 'tool_call',
-                  reason: started.request.reason,
-                  riskScore: decision.riskScore,
-                },
-              });
-              await this.appendExecutionNode(run.id, {
-                turnIndex,
-                kind: 'approval',
-                phase: 'approval',
-                actor: this.buildActorRef('system', 'approval-manager', 'Approval Manager'),
-                status: 'pending',
-                summary: `Approval requested for tool call: ${started.request.reason}`,
-                metadata: {
-                  requestId: started.request.id,
-                  mode: started.request.mode,
-                  riskScore: decision.riskScore,
-                },
-              }, 'approved_by');
-              await this.appendTranscriptEntry({
-                runId: run.id,
-                agentId: this.definition.id,
-                turnIndex,
-                kind: 'approval_event',
-                content: `Approval requested for tool call: ${started.request.reason}`,
-                metadata: {
-                  requestId: started.request.id,
-                  mode: started.request.mode,
-                  riskScore: decision.riskScore,
-                },
-              });
-              return {
-                blocked: true,
-                waitingForApproval: true,
-                requestId: started.request.id,
-                approvalMode: started.request.mode,
-                reasons: [started.request.reason],
-                policyDecision: decision,
-              } satisfies ProposalControlResult;
-            }
-
-            run.approvalDecisions.push(started.decision);
-            this.emitEvent({
-              id: eventId(),
-              type: 'approval_resolved',
-              runId: run.id,
-              agentId: this.definition.id,
-              turnIndex,
-              timestamp: Date.now(),
-              data: {
-                requestId: started.request.id,
-                approved: started.decision.approved,
-                approver: started.decision.decidedBy,
-                reason: started.decision.reason,
-              },
-            });
-            await this.appendExecutionNode(run.id, {
-              turnIndex,
-              kind: 'approval',
-              phase: 'approval',
-              actor: this.buildActorRef('operator', started.decision.decidedBy, started.decision.decidedBy),
-              status: started.decision.approved ? 'success' : 'blocked',
-              summary: `Approval ${started.decision.approved ? 'granted' : 'denied'}`,
-              metadata: {
-                requestId: started.request.id,
-                reason: started.decision.reason,
-              },
-            }, 'approved_by');
-            await this.appendTranscriptEntry({
-              runId: run.id,
-              agentId: this.definition.id,
-              turnIndex,
-              kind: 'approval_event',
-              content: `Approval ${started.decision.approved ? 'granted' : 'denied'} by ${started.decision.decidedBy}: ${started.decision.reason ?? 'No reason provided'}`,
-              metadata: {
-                requestId: started.request.id,
-                mode: started.request.mode,
-                approved: started.decision.approved,
-              },
-            });
-
-            await this.runHooks('afterApprovalDecision', {
-              runId: run.id,
-              agentId: this.definition.id,
-              turnIndex,
+          await this.appendExecutionNode(run.id, {
+            turnIndex,
+            kind: 'approval',
+            phase: 'approval',
+            actor: this.buildActorRef('system', 'approval-manager', 'Approval Manager'),
+            status: 'pending',
+            summary: `Approval requested for tool call: ${started.request.reason}`,
+            metadata: {
               requestId: started.request.id,
-              approved: started.decision.approved,
-              approver: started.decision.decidedBy,
-              reason: started.decision.reason,
-            }, { runId: run.id, turnIndex });
-
-            if (!started.decision.approved) {
-              return {
-                blocked: true,
-                terminalState: 'failed',
-                reasons: [`Approval denied: ${started.decision.reason ?? 'Unknown reason'}`],
-                approvalDecision: started.decision,
-                policyDecision: decision,
-              } satisfies ProposalControlResult;
-            }
-          }
-        }
-
-        // ── Standalone Security Gateway (dual-layer enforcement) ──
-        // When configured, evaluates the same proposal through the framework-agnostic
-        // security gateway used by external (non-SDK) agents. Worst-verdict-wins.
-        if (this.securityGateway) {
-          try {
-            const p = proposal as ActionProposal;
-            let actionType: string;
-            let toolCalls: Array<{ name: string; arguments: Record<string, unknown>; description?: string }> | undefined;
-            let content: string | undefined;
-            let targetAgentId: string | undefined;
-
-            switch (p.type) {
-              case 'tool_call':
-                actionType = 'tool_call';
-                toolCalls = p.toolCalls.map((tc) => ({ name: tc.name, arguments: (tc as any).args ?? {}, description: (tc as any).description }));
-                break;
-              case 'final_answer':
-                actionType = 'llm_call';
-                content = p.answer;
-                break;
-              case 'handoff':
-                actionType = 'handoff';
-                targetAgentId = p.targetAgentId;
-                content = p.context;
-                break;
-              case 'memory_write':
-                actionType = 'memory_write';
-                break;
-              default:
-                actionType = 'custom';
-                break;
-            }
-
-            const gwResult = await this.securityGateway.evaluate({
-              agent: { agentId: this.definition.id, name: this.definition.name, framework: 'veridex-sdk' },
-              action: { type: actionType, toolCalls, content, targetAgentId },
-              runId: run.id,
-              turnIndex,
-              runSpendUsd: this.payments?.getRunSpend() ?? 0,
-              totalTokens: run.totalUsage.totalTokens,
-            });
-            // TODO: why was the sovereignty violation events for compliance audit trail removed? Re-add with proper event type and handling in compliance module
-
-            if (gwResult.verdict === 'block') {
-              const gwDecision: PolicyDecision = {
-                verdict: 'block',
-                riskScore: gwResult.riskScore,
-                reasons: gwResult.reasons.map((r: string) => `[SecurityGateway] ${r}`),
-                checks: [],
-                evaluatedAt: Date.now(),
-              };
-              run.policyDecisions.push(gwDecision);
-              this.emitEvent({
-                id: eventId(),
-                type: 'policy_evaluated',
-                runId: run.id,
-                agentId: this.definition.id,
-                turnIndex,
-                timestamp: Date.now(),
-                data: { verdict: 'block', riskScore: gwResult.riskScore, reasons: gwDecision.reasons },
-              } as TraceEvent);
-              return {
-                blocked: true,
-                terminalState: 'failed',
-                reasons: gwDecision.reasons,
-                policyDecision: gwDecision,
-              } satisfies ProposalControlResult;
-            }
-          } catch (gwErr) {
-            console.warn('[SecurityGateway] Evaluation failed (non-blocking):', gwErr);
-          }
-        }
-
-        if (options?.approval?.approved) {
-          this.emitEvent({
-            id: eventId(),
-            type: 'approval_resolved',
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            timestamp: Date.now(),
-            data: {
-              requestId: options.approval.requestId,
-              approved: true,
-              approver: options.approval.approver ?? 'operator',
-              reason: options.approval.reason,
-            },
-          });
-          await this.appendExecutionNode(run.id, {
-            turnIndex,
-            kind: 'approval',
-            phase: 'approval',
-            actor: this.buildActorRef('operator', options.approval.approver ?? 'operator', options.approval.approver ?? 'operator'),
-            status: 'success',
-            summary: 'Approval resolved during resume',
-            metadata: {
-              requestId: options.approval.requestId,
-              reason: options.approval.reason,
-            },
-          }, 'approved_by');
-          await this.runHooks('afterApprovalDecision', {
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            requestId: options.approval.requestId,
-            approved: true,
-            approver: options.approval.approver ?? 'operator',
-            reason: options.approval.reason,
-          }, { runId: run.id, turnIndex });
-        }
-
-        if (this.payments?.isAvailable()) {
-          for (const toolCall of proposal.toolCalls) {
-            const capability = this.executionSurface.get(toolCall.name);
-            const tool = this.tools.get(toolCall.name);
-            const estimate = capability?.costEstimate?.(toolCall.arguments) ?? tool?.costEstimate?.(toolCall.arguments);
-            if (!estimate) continue;
-
-            const beforePayment = await this.runHooks('beforePayment', {
-              runId: run.id,
-              agentId: this.definition.id,
-              turnIndex,
-              toolName: toolCall.name,
-              estimate,
-            }, { runId: run.id, turnIndex });
-            if (beforePayment.override === 'deny') {
-              return {
-                blocked: true,
-                terminalState: 'failed',
-                reasons: beforePayment.reasons,
-              } satisfies ProposalControlResult;
-            }
-
-            const budget = this.payments.checkBudget(estimate.estimatedUSD);
-            if (!budget.allowed) {
-              return {
-                blocked: true,
-                terminalState: 'failed',
-                reasons: [budget.reason ?? 'Budget check failed'],
-                estimatedSpendUSD: estimate.estimatedUSD,
-              } satisfies ProposalControlResult;
-            }
-          }
-        }
-
-        const context = {
-          runId: run.id,
-          agentId: this.definition.id,
-          turnIndex,
-          sdk: this.core?.isAvailable() ? this.core.getSDK() : undefined,
-          wallet: this.payments?.isAvailable() ? this.payments.getPayments() : undefined,
-        };
-
-        const results: ToolExecutionResult[] = [];
-        for (const toolCall of proposal.toolCalls) {
-          const capability = this.executionSurface.get(toolCall.name);
-          const tool = this.tools.get(toolCall.name);
-          const toolName = toolCall.name;
-          const safetyClass = capability?.safetyClass ?? tool?.safetyClass ?? 'read';
-
-          const beforeValidation = await this.runHooks('beforeToolValidation', {
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            toolName,
-            toolInput: toolCall.arguments,
-            safetyClass,
-          }, { runId: run.id, turnIndex });
-
-          if (beforeValidation.override === 'deny') {
-            results.push({
-              toolCall,
-              result: {
-                llmOutput: '',
-                success: false,
-                error: beforeValidation.reasons.join('; ') || 'Tool validation denied by hook',
-              },
-              durationMs: 0,
-              retryCount: 0,
-              outcome: 'policy_blocked',
-            });
-            continue;
-          }
-
-          const validationError = capability?.tool
-            ? this.toolValidator.validateInput(capability.tool, toolCall.arguments)
-            : !capability
-              ? `Tool '${toolName}' not found`
-              : undefined;
-
-          await this.runHooks('afterToolValidation', {
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            toolName,
-            toolInput: toolCall.arguments,
-            safetyClass,
-            passed: !validationError,
-            error: validationError,
-          }, { runId: run.id, turnIndex });
-
-          if (validationError) {
-            results.push({
-              toolCall,
-              result: {
-                llmOutput: `Validation error: ${validationError}`,
-                success: false,
-                error: validationError,
-              },
-              durationMs: 0,
-              retryCount: 0,
-              outcome: 'permanent_failure',
-            });
-            continue;
-          }
-
-          const beforeExecute = await this.runHooks('beforeToolExecute', {
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            toolName,
-            toolInput: toolCall.arguments,
-            safetyClass,
-          }, { runId: run.id, turnIndex });
-
-          if (beforeExecute.override === 'deny') {
-            results.push({
-              toolCall,
-              result: {
-                llmOutput: '',
-                success: false,
-                error: beforeExecute.reasons.join('; ') || 'Tool execution denied by hook',
-              },
-              durationMs: 0,
-              retryCount: 0,
-              outcome: 'policy_blocked',
-            });
-            continue;
-          }
-
-          const idempotencyKey = this.buildIdempotencyKey(run.id, turnIndex, toolCall);
-          const existingReceipt = await this.executionGraphs.findReceiptByIdempotencyKey(run.id, idempotencyKey);
-          this.emitEvent({
-            id: eventId(),
-            type: 'capability_invoked',
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            timestamp: Date.now(),
-            data: {
-              capabilityName: toolName,
-              source: capability?.source,
-              safetyClass,
-              idempotencyKey,
-            },
-          });
-          await this.appendExecutionNode(run.id, {
-            turnIndex,
-            kind: 'capability',
-            phase: 'execution',
-            actor: this.buildActorRef('tool', toolName, toolName),
-            capabilityName: toolName,
-            status: existingReceipt ? 'skipped' : 'pending',
-            summary: existingReceipt
-              ? `Skipped ${toolName}; existing receipt ${existingReceipt.id}`
-              : `Invoking capability ${toolName}`,
-            metadata: {
-              source: capability?.source,
-              safetyClass,
-              idempotencyKey,
-            },
-          }, 'invoked');
-
-          if (existingReceipt) {
-            const execution: ToolExecutionResult = {
-              toolCall,
-              result: {
-                llmOutput: existingReceipt.summary,
-                uiOutput: existingReceipt.summary,
-                success: true,
-              },
-              durationMs: 0,
-              retryCount: 0,
-              outcome: 'idempotent_skip',
-              receipt: existingReceipt,
-            };
-            results.push(execution);
-            await this.recordSideEffectReceipt({
-              ...existingReceipt,
-              status: 'skipped',
-              summary: `Idempotent skip for ${toolName}`,
-              recordedAt: Date.now(),
-            });
-            continue;
-          }
-
-          let execution: ToolExecutionResult;
-          if (capability?.tool) {
-            execution = await this.toolExecutor.execute(toolCall, context);
-          } else if (capability) {
-            const startedAt = Date.now();
-            try {
-              const result = await capability.execute({
-                input: toolCall.arguments,
-                context,
-              });
-              execution = {
-                toolCall,
-                result,
-                durationMs: Date.now() - startedAt,
-                retryCount: 0,
-              };
-            } catch (error) {
-              execution = {
-                toolCall,
-                result: {
-                  llmOutput: '',
-                  success: false,
-                  error: error instanceof Error ? error.message : String(error),
-                },
-                durationMs: Date.now() - startedAt,
-                retryCount: 0,
-              };
-            }
-          } else {
-            execution = {
-              toolCall,
-              result: {
-                llmOutput: '',
-                success: false,
-                error: `Tool '${toolName}' not found`,
-              },
-              durationMs: 0,
-              retryCount: 0,
-            };
-          }
-
-          execution.outcome = this.classifyToolExecutionOutcome(execution);
-          const receipt: SideEffectReceipt = {
-            id: `receipt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-            runId: run.id,
-            turnIndex,
-            capabilityName: toolName,
-            idempotencyKey,
-            status: execution.result.success === false ? 'failed' : 'recorded',
-            summary: execution.result.success === false
-              ? `${toolName} failed: ${execution.result.error ?? 'Unknown error'}`
-              : `${toolName} executed successfully`,
-            resource: undefined,
-            metadata: {
-              source: capability?.source,
-              durationMs: execution.durationMs,
-              outcome: execution.outcome,
-            },
-            recordedAt: Date.now(),
-          };
-          execution.receipt = await this.recordSideEffectReceipt(receipt);
-
-          await this.runHooks('afterToolExecute', {
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            toolName,
-            toolInput: toolCall.arguments,
-            toolOutput: execution.result,
-            safetyClass,
-            success: execution.result.success,
-          }, { runId: run.id, turnIndex });
-
-          results.push(execution);
-          await this.appendTranscriptEntry({
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            kind: 'tool_result',
-            content: `${toolName}: ${execution.result.success ? 'success' : 'failure'}${execution.result.error ? ` (${execution.result.error})` : ''}`,
-            metadata: {
-              source: capability?.source,
-              durationMs: execution.durationMs,
-              success: execution.result.success,
-              outcome: execution.outcome,
-              receiptId: execution.receipt?.id,
-            },
-          });
-        }
-
-        // Emit tool events
-        for (const r of results) {
-          const tool = this.tools.get(r.toolCall.name);
-          const amountUSD = r.result.metrics?.costUSD;
-
-          if (
-            amountUSD !== undefined &&
-            amountUSD > 0 &&
-            this.payments?.isAvailable()
-          ) {
-            this.payments.recordSpend(amountUSD);
-          }
-
-          if (amountUSD !== undefined || tool?.safetyClass === 'financial') {
-            this.emitEvent({
-              id: eventId(),
-              type: 'payment_attempted',
-              runId: run.id,
-              agentId: this.definition.id,
-              turnIndex,
-              timestamp: Date.now(),
-              data: {
-                protocol: typeof r.toolCall.arguments.protocol === 'string'
-                  ? r.toolCall.arguments.protocol
-                  : 'tool',
-                amountUSD: amountUSD ?? 0,
-                chain: typeof r.toolCall.arguments.chain === 'string'
-                  ? r.toolCall.arguments.chain
-                  : 'unknown',
-                recipient: typeof r.toolCall.arguments.recipient === 'string'
-                  ? r.toolCall.arguments.recipient
-                  : r.toolCall.name,
-                success: r.result.success !== false,
-                txHash: typeof r.toolCall.arguments.txHash === 'string'
-                  ? r.toolCall.arguments.txHash
-                  : undefined,
-                error: r.result.error,
-              },
-            });
-            await this.runHooks('afterPayment', {
-              runId: run.id,
-              agentId: this.definition.id,
-              turnIndex,
-              toolName: r.toolCall.name,
-              amountUSD: amountUSD ?? 0,
-              success: r.result.success !== false,
-              error: r.result.error,
-            }, { runId: run.id, turnIndex });
-          }
-
-          this.emitEvent({
-            id: eventId(),
-            type: 'tool_executed',
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            timestamp: Date.now(),
-            data: {
-              toolName: r.toolCall.name,
-              success: r.result.success !== false,
-              durationMs: r.durationMs,
-              error: r.result.error,
-            },
-          });
-        }
-
-        return results;
-      }
-
-      case 'memory_write': {
-        for (const req of proposal.writes) {
-          const beforeWrite = await this.runHooks('beforeMemoryWrite', {
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            request: req,
-          }, { runId: run.id, turnIndex });
-          if (beforeWrite.override === 'deny') {
-            continue;
-          }
-
-          const validation = await this.validateMemoryProposal(req);
-          await this.appendExecutionNode(run.id, {
-            turnIndex,
-            kind: 'proposal',
-            phase: 'validation',
-            actor: this.buildActorRef('system', 'memory-validator', 'Memory Validator'),
-            proposalType: 'memory_write',
-            status: validation.accepted ? 'success' : 'blocked',
-            summary: validation.accepted ? 'Memory proposal validated' : 'Memory proposal rejected',
-            metadata: {
-              issues: validation.issues,
-            },
-          }, 'validated_by');
-          this.emitEvent({
-            id: eventId(),
-            type: 'proposal_validated',
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            timestamp: Date.now(),
-            data: {
-              proposalType: 'memory_write',
-              accepted: validation.accepted,
-              issues: validation.issues.map((issue) => `${issue.code}: ${issue.message}`),
-            },
-          });
-          if (!validation.accepted) {
-            continue;
-          }
-
-          if (req.entry.kind === 'workspace_state' && req.entry.stateRef && this.workspaceState?.isAvailable()) {
-            const resourceRef = this.stateRefToResourceRef(req.entry.stateRef);
-            this.emitEvent({
-              id: eventId(),
-              type: 'resource_mutation_proposed',
-              runId: run.id,
-              agentId: this.definition.id,
-              turnIndex,
-              timestamp: Date.now(),
-              data: {
-                resourceType: req.entry.stateRef.resourceType,
-                resourceId: req.entry.stateRef.resourceId,
-                operation: 'update',
-              },
-            });
-            await this.appendExecutionNode(run.id, {
-              turnIndex,
-              kind: 'resource_mutation',
-              phase: 'mutation',
-              actor: this.buildActorRef('agent', this.definition.id, this.definition.name),
-              resource: resourceRef,
-              status: 'pending',
-              summary: `Workspace mutation proposed for ${req.entry.stateRef.resourceType}/${req.entry.stateRef.resourceId}`,
-              metadata: {
-                overwriteStrategy: req.overwriteStrategy,
-              },
-            }, 'mutates');
-
-            const mutation = await this.workspaceState.proposeMutation({
-              ref: req.entry.stateRef,
-              operation: req.overwriteStrategy === 'append' ? 'update' : 'update',
-              payload: {
-                content: req.entry.content,
-                tags: req.entry.tags,
-                metadata: req.entry.metadata,
-                confidence: req.entry.confidence,
-                evidenceRef: req.entry.evidenceRef,
-              },
-              reason: `Run ${run.id} turn ${turnIndex} proposed workspace-state mutation`,
-              expectedVersion: req.entry.stateRef.version,
-              idempotencyKey: `mem:${run.id}:${turnIndex}:${req.entry.stateRef.resourceType}:${req.entry.stateRef.resourceId}`,
-            });
-
-            this.emitEvent({
-              id: eventId(),
-              type: 'resource_mutation_committed',
-              runId: run.id,
-              agentId: this.definition.id,
-              turnIndex,
-              timestamp: Date.now(),
-              data: {
-                resourceType: req.entry.stateRef.resourceType,
-                resourceId: req.entry.stateRef.resourceId,
-                accepted: mutation.accepted,
-                reason: mutation.rejectionReason,
-              },
-            });
-            await this.appendExecutionNode(run.id, {
-              turnIndex,
-              kind: 'resource_mutation',
-              phase: 'mutation',
-              actor: this.buildActorRef('system', 'workspace-state', 'Workspace State'),
-              resource: resourceRef,
-              status: mutation.accepted ? 'success' : 'blocked',
-              summary: mutation.accepted
-                ? `Workspace mutation committed for ${req.entry.stateRef.resourceType}/${req.entry.stateRef.resourceId}`
-                : `Workspace mutation rejected for ${req.entry.stateRef.resourceType}/${req.entry.stateRef.resourceId}`,
-              metadata: mutation.snapshot ? { snapshot: mutation.snapshot } : { rejectionReason: mutation.rejectionReason },
-            }, 'mutates');
-
-            if (!mutation.accepted) {
-              continue;
-            }
-          }
-
-          const entry = await this.memory.write(req);
-          this.emitEvent({
-            id: eventId(),
-            type: 'memory_written',
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            timestamp: Date.now(),
-            data: {
-              tier: entry.tier,
-              entryId: entry.id,
-              scope: entry.scope,
-              provenance: entry.provenance,
-            },
-          });
-          await this.runHooks('afterMemoryWrite', {
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            entry,
-          }, { runId: run.id, turnIndex });
-          await this.appendTranscriptEntry({
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            kind: 'system_note',
-            content: `Memory write recorded to ${entry.tier}/${entry.scope}: ${entry.content}`,
-            metadata: {
-              entryId: entry.id,
-              tier: entry.tier,
-              scope: entry.scope,
-            },
-          });
-        }
-        return { written: proposal.writes.length };
-      }
-
-      case 'final_answer':
-        return undefined;
-
-      case 'handoff':
-        {
-          const beforeHandoff = await this.runHooks('beforeHandoff', {
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            proposal,
-          }, { runId: run.id, turnIndex });
-          if (beforeHandoff.override === 'deny') {
-            return {
-              blocked: true,
-              terminalState: 'failed',
-              reasons: beforeHandoff.reasons,
-            } satisfies ProposalControlResult;
-          }
-        this.emitEvent({
-          id: eventId(),
-          type: 'handoff_initiated',
-          runId: run.id,
-          agentId: this.definition.id,
-          turnIndex,
-          timestamp: Date.now(),
-          data: {
-            targetAgentId: proposal.targetAgentId,
-            reason: proposal.reason,
-          },
-        });
-          await this.appendExecutionNode(run.id, {
-            turnIndex,
-            kind: 'capability',
-            phase: 'execution',
-            actor: this.buildActorRef('remote_agent', proposal.targetAgentId, proposal.targetAgentId),
-            capabilityName: proposal.targetAgentId,
-            status: 'pending',
-            summary: `Handoff initiated to ${proposal.targetAgentId}`,
-            metadata: {
-              reason: proposal.reason,
-            },
-          }, 'invoked');
-          await this.appendTranscriptEntry({
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            kind: 'handoff',
-            content: `Handoff to ${proposal.targetAgentId}: ${proposal.reason}`,
-            metadata: {
-              targetAgentId: proposal.targetAgentId,
-            },
-          });
-          const handler = this.handoffHandlers.get(proposal.targetAgentId);
-          if (handler) {
-            const handoff = await handler({
-              runId: run.id,
-              agentId: this.definition.id,
-              turnIndex,
-              targetAgentId: proposal.targetAgentId,
-              reason: proposal.reason,
-              context: proposal.context,
-              sdk: this.core?.getSDK(),
-              wallet: this.payments?.getPayments(),
-            });
-
-            await this.runHooks('afterHandoff', {
-              runId: run.id,
-              agentId: this.definition.id,
-              turnIndex,
-              proposal,
-              result: handoff,
-            }, { runId: run.id, turnIndex });
-
-            if (!handoff.success) {
-              return {
-                blocked: true,
-                terminalState: 'failed',
-                reasons: [handoff.error ?? `Handoff to "${proposal.targetAgentId}" failed`],
-                metadata: handoff.metadata,
-              } satisfies ProposalControlResult;
-            }
-
-            return {
-              terminalState: 'completed',
-              output: handoff.output,
-              metadata: handoff.metadata,
-            } satisfies ProposalControlResult;
-          }
-
-          await this.runHooks('afterHandoff', {
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            proposal,
-          }, { runId: run.id, turnIndex });
-        return { targetAgentId: proposal.targetAgentId, reason: proposal.reason };
-        }
-
-      case 'approval_request':
-        {
-          const beforeApproval = await this.runHooks('beforeApprovalRequest', {
-            runId: run.id,
-            agentId: this.definition.id,
-            turnIndex,
-            proposal,
-          }, { runId: run.id, turnIndex });
-          if (beforeApproval.override === 'deny') {
-            return {
-              blocked: true,
-              terminalState: 'failed',
-              reasons: beforeApproval.reasons,
-            } satisfies ProposalControlResult;
-          }
-        this.emitEvent({
-          id: eventId(),
-          type: 'approval_requested',
-          runId: run.id,
-          agentId: this.definition.id,
-          turnIndex,
-          timestamp: Date.now(),
-          data: {
-            action: proposal.action,
-            reason: proposal.reason,
-            riskScore: proposal.riskScore,
-          },
-        });
-          await this.appendExecutionNode(run.id, {
-            turnIndex,
-            kind: 'approval',
-            phase: 'approval',
-            actor: this.buildActorRef('agent', this.definition.id, this.definition.name),
-            status: 'pending',
-            summary: `Approval explicitly requested for ${proposal.action}`,
-            metadata: {
-              reason: proposal.reason,
-              riskScore: proposal.riskScore,
+              mode: started.request.mode,
+              riskScore: decision.riskScore,
             },
           }, 'approved_by');
           await this.appendTranscriptEntry({
@@ -2803,22 +2004,858 @@ export class AgentRuntime {
             agentId: this.definition.id,
             turnIndex,
             kind: 'approval_event',
-            content: `Approval requested: ${proposal.action} (${proposal.reason})`,
+            content: `Approval requested for tool call: ${started.request.reason}`,
             metadata: {
-              action: proposal.action,
-              riskScore: proposal.riskScore,
+              requestId: started.request.id,
+              mode: started.request.mode,
+              riskScore: decision.riskScore,
             },
           });
           return {
-            action: proposal.action,
-            reason: proposal.reason,
+            blocked: true,
             waitingForApproval: true,
-          };
+            requestId: started.request.id,
+            approvalMode: started.request.mode,
+            reasons: [started.request.reason],
+            policyDecision: decision,
+          } satisfies ProposalControlResult;
         }
 
-      default:
-        return undefined;
+        run.approvalDecisions.push(started.decision);
+        this.emitEvent({
+          id: eventId(),
+          type: 'approval_resolved',
+          runId: run.id,
+          agentId: this.definition.id,
+          turnIndex,
+          timestamp: Date.now(),
+          data: {
+            requestId: started.request.id,
+            approved: started.decision.approved,
+            approver: started.decision.decidedBy,
+            reason: started.decision.reason,
+          },
+        });
+        await this.appendExecutionNode(run.id, {
+          turnIndex,
+          kind: 'approval',
+          phase: 'approval',
+          actor: this.buildActorRef('operator', started.decision.decidedBy, started.decision.decidedBy),
+          status: started.decision.approved ? 'success' : 'blocked',
+          summary: `Approval ${started.decision.approved ? 'granted' : 'denied'}`,
+          metadata: {
+            requestId: started.request.id,
+            reason: started.decision.reason,
+          },
+        }, 'approved_by');
+        await this.appendTranscriptEntry({
+          runId: run.id,
+          agentId: this.definition.id,
+          turnIndex,
+          kind: 'approval_event',
+          content: `Approval ${started.decision.approved ? 'granted' : 'denied'} by ${started.decision.decidedBy}: ${started.decision.reason ?? 'No reason provided'}`,
+          metadata: {
+            requestId: started.request.id,
+            mode: started.request.mode,
+            approved: started.decision.approved,
+          },
+        });
+
+        await this.runHooks('afterApprovalDecision', {
+          runId: run.id,
+          agentId: this.definition.id,
+          turnIndex,
+          requestId: started.request.id,
+          approved: started.decision.approved,
+          approver: started.decision.decidedBy,
+          reason: started.decision.reason,
+        }, { runId: run.id, turnIndex });
+
+        if (!started.decision.approved) {
+          return {
+            blocked: true,
+            terminalState: 'failed',
+            reasons: [`Approval denied: ${started.decision.reason ?? 'Unknown reason'}`],
+            approvalDecision: started.decision,
+            policyDecision: decision,
+          } satisfies ProposalControlResult;
+        }
+      }
     }
+
+    // ── Standalone Security Gateway (dual-layer enforcement) ──
+    // When configured, evaluates the same proposal through the framework-agnostic
+    // security gateway used by external (non-SDK) agents. Worst-verdict-wins.
+    if (this.securityGateway) {
+      try {
+        const p = proposal as ActionProposal;
+        let actionType: string;
+        let toolCalls: Array<{ name: string; arguments: Record<string, unknown>; description?: string }> | undefined;
+        let content: string | undefined;
+        let targetAgentId: string | undefined;
+
+        switch (p.type) {
+          case 'tool_call':
+            actionType = 'tool_call';
+            toolCalls = p.toolCalls.map((tc) => ({ name: tc.name, arguments: (tc as any).args ?? {}, description: (tc as any).description }));
+            break;
+          case 'final_answer':
+            actionType = 'llm_call';
+            content = p.answer;
+            break;
+          case 'handoff':
+            actionType = 'handoff';
+            targetAgentId = p.targetAgentId;
+            content = p.context;
+            break;
+          case 'memory_write':
+            actionType = 'memory_write';
+            break;
+          default:
+            actionType = 'custom';
+            break;
+        }
+
+        const gwResult = await this.securityGateway.evaluate({
+          agent: { agentId: this.definition.id, name: this.definition.name, framework: 'veridex-sdk' },
+          action: { type: actionType, toolCalls, content, targetAgentId },
+          runId: run.id,
+          turnIndex,
+          runSpendUsd: this.payments?.getRunSpend() ?? 0,
+          totalTokens: run.totalUsage.totalTokens,
+        });
+        // TODO: why was the sovereignty violation events for compliance audit trail removed? Re-add with proper event type and handling in compliance module
+
+        if (gwResult.verdict === 'block') {
+          const gwDecision: PolicyDecision = {
+            verdict: 'block',
+            riskScore: gwResult.riskScore,
+            reasons: gwResult.reasons.map((r: string) => `[SecurityGateway] ${r}`),
+            checks: [],
+            evaluatedAt: Date.now(),
+          };
+          run.policyDecisions.push(gwDecision);
+          this.emitEvent({
+            id: eventId(),
+            type: 'policy_evaluated',
+            runId: run.id,
+            agentId: this.definition.id,
+            turnIndex,
+            timestamp: Date.now(),
+            data: { verdict: 'block', riskScore: gwResult.riskScore, reasons: gwDecision.reasons },
+          } as TraceEvent);
+          return {
+            blocked: true,
+            terminalState: 'failed',
+            reasons: gwDecision.reasons,
+            policyDecision: gwDecision,
+          } satisfies ProposalControlResult;
+        }
+      } catch (gwErr) {
+        console.warn('[SecurityGateway] Evaluation failed (non-blocking):', gwErr);
+      }
+    }
+
+    if (options?.approval?.approved) {
+      this.emitEvent({
+        id: eventId(),
+        type: 'approval_resolved',
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        timestamp: Date.now(),
+        data: {
+          requestId: options.approval.requestId,
+          approved: true,
+          approver: options.approval.approver ?? 'operator',
+          reason: options.approval.reason,
+        },
+      });
+      await this.appendExecutionNode(run.id, {
+        turnIndex,
+        kind: 'approval',
+        phase: 'approval',
+        actor: this.buildActorRef('operator', options.approval.approver ?? 'operator', options.approval.approver ?? 'operator'),
+        status: 'success',
+        summary: 'Approval resolved during resume',
+        metadata: {
+          requestId: options.approval.requestId,
+          reason: options.approval.reason,
+        },
+      }, 'approved_by');
+      await this.runHooks('afterApprovalDecision', {
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        requestId: options.approval.requestId,
+        approved: true,
+        approver: options.approval.approver ?? 'operator',
+        reason: options.approval.reason,
+      }, { runId: run.id, turnIndex });
+    }
+
+    if (this.payments?.isAvailable()) {
+      for (const toolCall of proposal.toolCalls) {
+        const capability = this.executionSurface.get(toolCall.name);
+        const tool = this.tools.get(toolCall.name);
+        const estimate = capability?.costEstimate?.(toolCall.arguments) ?? tool?.costEstimate?.(toolCall.arguments);
+        if (!estimate) continue;
+
+        const beforePayment = await this.runHooks('beforePayment', {
+          runId: run.id,
+          agentId: this.definition.id,
+          turnIndex,
+          toolName: toolCall.name,
+          estimate,
+        }, { runId: run.id, turnIndex });
+        if (beforePayment.override === 'deny') {
+          return {
+            blocked: true,
+            terminalState: 'failed',
+            reasons: beforePayment.reasons,
+          } satisfies ProposalControlResult;
+        }
+
+        const budget = this.payments.checkBudget(estimate.estimatedUSD);
+        if (!budget.allowed) {
+          return {
+            blocked: true,
+            terminalState: 'failed',
+            reasons: [budget.reason ?? 'Budget check failed'],
+            estimatedSpendUSD: estimate.estimatedUSD,
+          } satisfies ProposalControlResult;
+        }
+      }
+    }
+
+    const context = {
+      runId: run.id,
+      agentId: this.definition.id,
+      turnIndex,
+      sdk: this.core?.isAvailable() ? this.core.getSDK() : undefined,
+      wallet: this.payments?.isAvailable() ? this.payments.getPayments() : undefined,
+    };
+
+    const results: ToolExecutionResult[] = [];
+    for (const toolCall of proposal.toolCalls) {
+      const capability = this.executionSurface.get(toolCall.name);
+      const tool = this.tools.get(toolCall.name);
+      const toolName = toolCall.name;
+      const safetyClass = capability?.safetyClass ?? tool?.safetyClass ?? 'read';
+
+      const beforeValidation = await this.runHooks('beforeToolValidation', {
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        toolName,
+        toolInput: toolCall.arguments,
+        safetyClass,
+      }, { runId: run.id, turnIndex });
+
+      if (beforeValidation.override === 'deny') {
+        results.push({
+          toolCall,
+          result: {
+            llmOutput: '',
+            success: false,
+            error: beforeValidation.reasons.join('; ') || 'Tool validation denied by hook',
+          },
+          durationMs: 0,
+          retryCount: 0,
+          outcome: 'policy_blocked',
+        });
+        continue;
+      }
+
+      const validationError = capability?.tool
+        ? this.toolValidator.validateInput(capability.tool, toolCall.arguments)
+        : !capability
+          ? `Tool '${toolName}' not found`
+          : undefined;
+
+      await this.runHooks('afterToolValidation', {
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        toolName,
+        toolInput: toolCall.arguments,
+        safetyClass,
+        passed: !validationError,
+        error: validationError,
+      }, { runId: run.id, turnIndex });
+
+      if (validationError) {
+        results.push({
+          toolCall,
+          result: {
+            llmOutput: `Validation error: ${validationError}`,
+            success: false,
+            error: validationError,
+          },
+          durationMs: 0,
+          retryCount: 0,
+          outcome: 'permanent_failure',
+        });
+        continue;
+      }
+
+      const beforeExecute = await this.runHooks('beforeToolExecute', {
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        toolName,
+        toolInput: toolCall.arguments,
+        safetyClass,
+      }, { runId: run.id, turnIndex });
+
+      if (beforeExecute.override === 'deny') {
+        results.push({
+          toolCall,
+          result: {
+            llmOutput: '',
+            success: false,
+            error: beforeExecute.reasons.join('; ') || 'Tool execution denied by hook',
+          },
+          durationMs: 0,
+          retryCount: 0,
+          outcome: 'policy_blocked',
+        });
+        continue;
+      }
+
+      const idempotencyKey = this.buildIdempotencyKey(run.id, turnIndex, toolCall);
+      const existingReceipt = await this.executionGraphs.findReceiptByIdempotencyKey(run.id, idempotencyKey);
+      this.emitEvent({
+        id: eventId(),
+        type: 'capability_invoked',
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        timestamp: Date.now(),
+        data: {
+          capabilityName: toolName,
+          source: capability?.source,
+          safetyClass,
+          idempotencyKey,
+        },
+      });
+      await this.appendExecutionNode(run.id, {
+        turnIndex,
+        kind: 'capability',
+        phase: 'execution',
+        actor: this.buildActorRef('tool', toolName, toolName),
+        capabilityName: toolName,
+        status: existingReceipt ? 'skipped' : 'pending',
+        summary: existingReceipt
+          ? `Skipped ${toolName}; existing receipt ${existingReceipt.id}`
+          : `Invoking capability ${toolName}`,
+        metadata: {
+          source: capability?.source,
+          safetyClass,
+          idempotencyKey,
+        },
+      }, 'invoked');
+
+      if (existingReceipt) {
+        const execution: ToolExecutionResult = {
+          toolCall,
+          result: {
+            llmOutput: existingReceipt.summary,
+            uiOutput: existingReceipt.summary,
+            success: true,
+          },
+          durationMs: 0,
+          retryCount: 0,
+          outcome: 'idempotent_skip',
+          receipt: existingReceipt,
+        };
+        results.push(execution);
+        await this.recordSideEffectReceipt({
+          ...existingReceipt,
+          status: 'skipped',
+          summary: `Idempotent skip for ${toolName}`,
+          recordedAt: Date.now(),
+        });
+        continue;
+      }
+
+      let execution: ToolExecutionResult;
+      if (capability?.tool) {
+        execution = await this.toolExecutor.execute(toolCall, context);
+      } else if (capability) {
+        const startedAt = Date.now();
+        try {
+          const result = await capability.execute({
+            input: toolCall.arguments,
+            context,
+          });
+          execution = {
+            toolCall,
+            result,
+            durationMs: Date.now() - startedAt,
+            retryCount: 0,
+          };
+        } catch (error) {
+          execution = {
+            toolCall,
+            result: {
+              llmOutput: '',
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            durationMs: Date.now() - startedAt,
+            retryCount: 0,
+          };
+        }
+      } else {
+        execution = {
+          toolCall,
+          result: {
+            llmOutput: '',
+            success: false,
+            error: `Tool '${toolName}' not found`,
+          },
+          durationMs: 0,
+          retryCount: 0,
+        };
+      }
+
+      execution.outcome = this.classifyToolExecutionOutcome(execution);
+      const receipt: SideEffectReceipt = {
+        id: `receipt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        runId: run.id,
+        turnIndex,
+        capabilityName: toolName,
+        idempotencyKey,
+        status: execution.result.success === false ? 'failed' : 'recorded',
+        summary: execution.result.success === false
+          ? `${toolName} failed: ${execution.result.error ?? 'Unknown error'}`
+          : `${toolName} executed successfully`,
+        resource: undefined,
+        metadata: {
+          source: capability?.source,
+          durationMs: execution.durationMs,
+          outcome: execution.outcome,
+        },
+        recordedAt: Date.now(),
+      };
+      execution.receipt = await this.recordSideEffectReceipt(receipt);
+
+      await this.runHooks('afterToolExecute', {
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        toolName,
+        toolInput: toolCall.arguments,
+        toolOutput: execution.result,
+        safetyClass,
+        success: execution.result.success,
+      }, { runId: run.id, turnIndex });
+
+      results.push(execution);
+      await this.appendTranscriptEntry({
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        kind: 'tool_result',
+        content: `${toolName}: ${execution.result.success ? 'success' : 'failure'}${execution.result.error ? ` (${execution.result.error})` : ''}`,
+        metadata: {
+          source: capability?.source,
+          durationMs: execution.durationMs,
+          success: execution.result.success,
+          outcome: execution.outcome,
+          receiptId: execution.receipt?.id,
+        },
+      });
+    }
+
+    // Emit tool events
+    for (const r of results) {
+      const tool = this.tools.get(r.toolCall.name);
+      const amountUSD = r.result.metrics?.costUSD;
+
+      if (
+        amountUSD !== undefined &&
+        amountUSD > 0 &&
+        this.payments?.isAvailable()
+      ) {
+        this.payments.recordSpend(amountUSD);
+      }
+
+      if (amountUSD !== undefined || tool?.safetyClass === 'financial') {
+        this.emitEvent({
+          id: eventId(),
+          type: 'payment_attempted',
+          runId: run.id,
+          agentId: this.definition.id,
+          turnIndex,
+          timestamp: Date.now(),
+          data: {
+            protocol: typeof r.toolCall.arguments.protocol === 'string'
+              ? r.toolCall.arguments.protocol
+              : 'tool',
+            amountUSD: amountUSD ?? 0,
+            chain: typeof r.toolCall.arguments.chain === 'string'
+              ? r.toolCall.arguments.chain
+              : 'unknown',
+            recipient: typeof r.toolCall.arguments.recipient === 'string'
+              ? r.toolCall.arguments.recipient
+              : r.toolCall.name,
+            success: r.result.success !== false,
+            txHash: typeof r.toolCall.arguments.txHash === 'string'
+              ? r.toolCall.arguments.txHash
+              : undefined,
+            error: r.result.error,
+          },
+        });
+        await this.runHooks('afterPayment', {
+          runId: run.id,
+          agentId: this.definition.id,
+          turnIndex,
+          toolName: r.toolCall.name,
+          amountUSD: amountUSD ?? 0,
+          success: r.result.success !== false,
+          error: r.result.error,
+        }, { runId: run.id, turnIndex });
+      }
+
+      this.emitEvent({
+        id: eventId(),
+        type: 'tool_executed',
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        timestamp: Date.now(),
+        data: {
+          toolName: r.toolCall.name,
+          success: r.result.success !== false,
+          durationMs: r.durationMs,
+          error: r.result.error,
+        },
+      });
+    }
+
+    return results;
+  }
+
+  /** Execute a memory-write proposal. Extracted verbatim from executeProposal. */
+  private async executeMemoryWriteProposal(
+    run: Run,
+    turnIndex: number,
+    proposal: MemoryWriteProposal,
+  ): Promise<unknown> {
+    for (const req of proposal.writes) {
+      const beforeWrite = await this.runHooks('beforeMemoryWrite', {
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        request: req,
+      }, { runId: run.id, turnIndex });
+      if (beforeWrite.override === 'deny') {
+        continue;
+      }
+
+      const validation = await this.validateMemoryProposal(req);
+      await this.appendExecutionNode(run.id, {
+        turnIndex,
+        kind: 'proposal',
+        phase: 'validation',
+        actor: this.buildActorRef('system', 'memory-validator', 'Memory Validator'),
+        proposalType: 'memory_write',
+        status: validation.accepted ? 'success' : 'blocked',
+        summary: validation.accepted ? 'Memory proposal validated' : 'Memory proposal rejected',
+        metadata: {
+          issues: validation.issues,
+        },
+      }, 'validated_by');
+      this.emitEvent({
+        id: eventId(),
+        type: 'proposal_validated',
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        timestamp: Date.now(),
+        data: {
+          proposalType: 'memory_write',
+          accepted: validation.accepted,
+          issues: validation.issues.map((issue) => `${issue.code}: ${issue.message}`),
+        },
+      });
+      if (!validation.accepted) {
+        continue;
+      }
+
+      if (req.entry.kind === 'workspace_state' && req.entry.stateRef && this.workspaceState?.isAvailable()) {
+        const resourceRef = this.stateRefToResourceRef(req.entry.stateRef);
+        this.emitEvent({
+          id: eventId(),
+          type: 'resource_mutation_proposed',
+          runId: run.id,
+          agentId: this.definition.id,
+          turnIndex,
+          timestamp: Date.now(),
+          data: {
+            resourceType: req.entry.stateRef.resourceType,
+            resourceId: req.entry.stateRef.resourceId,
+            operation: 'update',
+          },
+        });
+        await this.appendExecutionNode(run.id, {
+          turnIndex,
+          kind: 'resource_mutation',
+          phase: 'mutation',
+          actor: this.buildActorRef('agent', this.definition.id, this.definition.name),
+          resource: resourceRef,
+          status: 'pending',
+          summary: `Workspace mutation proposed for ${req.entry.stateRef.resourceType}/${req.entry.stateRef.resourceId}`,
+          metadata: {
+            overwriteStrategy: req.overwriteStrategy,
+          },
+        }, 'mutates');
+
+        const mutation = await this.workspaceState.proposeMutation({
+          ref: req.entry.stateRef,
+          operation: req.overwriteStrategy === 'append' ? 'update' : 'update',
+          payload: {
+            content: req.entry.content,
+            tags: req.entry.tags,
+            metadata: req.entry.metadata,
+            confidence: req.entry.confidence,
+            evidenceRef: req.entry.evidenceRef,
+          },
+          reason: `Run ${run.id} turn ${turnIndex} proposed workspace-state mutation`,
+          expectedVersion: req.entry.stateRef.version,
+          idempotencyKey: `mem:${run.id}:${turnIndex}:${req.entry.stateRef.resourceType}:${req.entry.stateRef.resourceId}`,
+        });
+
+        this.emitEvent({
+          id: eventId(),
+          type: 'resource_mutation_committed',
+          runId: run.id,
+          agentId: this.definition.id,
+          turnIndex,
+          timestamp: Date.now(),
+          data: {
+            resourceType: req.entry.stateRef.resourceType,
+            resourceId: req.entry.stateRef.resourceId,
+            accepted: mutation.accepted,
+            reason: mutation.rejectionReason,
+          },
+        });
+        await this.appendExecutionNode(run.id, {
+          turnIndex,
+          kind: 'resource_mutation',
+          phase: 'mutation',
+          actor: this.buildActorRef('system', 'workspace-state', 'Workspace State'),
+          resource: resourceRef,
+          status: mutation.accepted ? 'success' : 'blocked',
+          summary: mutation.accepted
+            ? `Workspace mutation committed for ${req.entry.stateRef.resourceType}/${req.entry.stateRef.resourceId}`
+            : `Workspace mutation rejected for ${req.entry.stateRef.resourceType}/${req.entry.stateRef.resourceId}`,
+          metadata: mutation.snapshot ? { snapshot: mutation.snapshot } : { rejectionReason: mutation.rejectionReason },
+        }, 'mutates');
+
+        if (!mutation.accepted) {
+          continue;
+        }
+      }
+
+      const entry = await this.memory.write(req);
+      this.emitEvent({
+        id: eventId(),
+        type: 'memory_written',
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        timestamp: Date.now(),
+        data: {
+          tier: entry.tier,
+          entryId: entry.id,
+          scope: entry.scope,
+          provenance: entry.provenance,
+        },
+      });
+      await this.runHooks('afterMemoryWrite', {
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        entry,
+      }, { runId: run.id, turnIndex });
+      await this.appendTranscriptEntry({
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        kind: 'system_note',
+        content: `Memory write recorded to ${entry.tier}/${entry.scope}: ${entry.content}`,
+        metadata: {
+          entryId: entry.id,
+          tier: entry.tier,
+          scope: entry.scope,
+        },
+      });
+    }
+    return { written: proposal.writes.length };
+  }
+
+  /** Execute a handoff proposal. Extracted verbatim from executeProposal. */
+  private async executeHandoffProposal(
+    run: Run,
+    turnIndex: number,
+    proposal: HandoffProposal,
+  ): Promise<unknown> {
+      const beforeHandoff = await this.runHooks('beforeHandoff', {
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        proposal,
+      }, { runId: run.id, turnIndex });
+      if (beforeHandoff.override === 'deny') {
+        return {
+          blocked: true,
+          terminalState: 'failed',
+          reasons: beforeHandoff.reasons,
+        } satisfies ProposalControlResult;
+      }
+    this.emitEvent({
+      id: eventId(),
+      type: 'handoff_initiated',
+      runId: run.id,
+      agentId: this.definition.id,
+      turnIndex,
+      timestamp: Date.now(),
+      data: {
+        targetAgentId: proposal.targetAgentId,
+        reason: proposal.reason,
+      },
+    });
+      await this.appendExecutionNode(run.id, {
+        turnIndex,
+        kind: 'capability',
+        phase: 'execution',
+        actor: this.buildActorRef('remote_agent', proposal.targetAgentId, proposal.targetAgentId),
+        capabilityName: proposal.targetAgentId,
+        status: 'pending',
+        summary: `Handoff initiated to ${proposal.targetAgentId}`,
+        metadata: {
+          reason: proposal.reason,
+        },
+      }, 'invoked');
+      await this.appendTranscriptEntry({
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        kind: 'handoff',
+        content: `Handoff to ${proposal.targetAgentId}: ${proposal.reason}`,
+        metadata: {
+          targetAgentId: proposal.targetAgentId,
+        },
+      });
+      const handler = this.handoffHandlers.get(proposal.targetAgentId);
+      if (handler) {
+        const handoff = await handler({
+          runId: run.id,
+          agentId: this.definition.id,
+          turnIndex,
+          targetAgentId: proposal.targetAgentId,
+          reason: proposal.reason,
+          context: proposal.context,
+          sdk: this.core?.getSDK(),
+          wallet: this.payments?.getPayments(),
+        });
+
+        await this.runHooks('afterHandoff', {
+          runId: run.id,
+          agentId: this.definition.id,
+          turnIndex,
+          proposal,
+          result: handoff,
+        }, { runId: run.id, turnIndex });
+
+        if (!handoff.success) {
+          return {
+            blocked: true,
+            terminalState: 'failed',
+            reasons: [handoff.error ?? `Handoff to "${proposal.targetAgentId}" failed`],
+            metadata: handoff.metadata,
+          } satisfies ProposalControlResult;
+        }
+
+        return {
+          terminalState: 'completed',
+          output: handoff.output,
+          metadata: handoff.metadata,
+        } satisfies ProposalControlResult;
+      }
+
+      await this.runHooks('afterHandoff', {
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        proposal,
+      }, { runId: run.id, turnIndex });
+    return { targetAgentId: proposal.targetAgentId, reason: proposal.reason };
+  }
+
+  /** Execute an approval-request proposal. Extracted verbatim from executeProposal. */
+  private async executeApprovalRequestProposal(
+    run: Run,
+    turnIndex: number,
+    proposal: ApprovalRequestProposal,
+  ): Promise<unknown> {
+      const beforeApproval = await this.runHooks('beforeApprovalRequest', {
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        proposal,
+      }, { runId: run.id, turnIndex });
+      if (beforeApproval.override === 'deny') {
+        return {
+          blocked: true,
+          terminalState: 'failed',
+          reasons: beforeApproval.reasons,
+        } satisfies ProposalControlResult;
+      }
+    this.emitEvent({
+      id: eventId(),
+      type: 'approval_requested',
+      runId: run.id,
+      agentId: this.definition.id,
+      turnIndex,
+      timestamp: Date.now(),
+      data: {
+        action: proposal.action,
+        reason: proposal.reason,
+        riskScore: proposal.riskScore,
+      },
+    });
+      await this.appendExecutionNode(run.id, {
+        turnIndex,
+        kind: 'approval',
+        phase: 'approval',
+        actor: this.buildActorRef('agent', this.definition.id, this.definition.name),
+        status: 'pending',
+        summary: `Approval explicitly requested for ${proposal.action}`,
+        metadata: {
+          reason: proposal.reason,
+          riskScore: proposal.riskScore,
+        },
+      }, 'approved_by');
+      await this.appendTranscriptEntry({
+        runId: run.id,
+        agentId: this.definition.id,
+        turnIndex,
+        kind: 'approval_event',
+        content: `Approval requested: ${proposal.action} (${proposal.reason})`,
+        metadata: {
+          action: proposal.action,
+          riskScore: proposal.riskScore,
+        },
+      });
+      return {
+        action: proposal.action,
+        reason: proposal.reason,
+        waitingForApproval: true,
+      };
   }
 
   /** Determine the next run state from a proposal. */
@@ -2956,6 +2993,38 @@ export class AgentRuntime {
     run: Run,
     turnIndex: number,
   ): Promise<ContextPlan> {
+    const { sections, includeMemory } = await this.assembleContextSections(run, turnIndex);
+
+    const beforeCompile = await this.runHooks('beforeContextCompile', {
+      runId: run.id,
+      agentId: this.definition.id,
+      turnIndex,
+      sections,
+    }, { runId: run.id, turnIndex });
+    if (beforeCompile.override === 'deny') {
+      throw new Error(`Context compilation denied by hook: ${beforeCompile.reasons.join('; ')}`);
+    }
+
+    const plan = await this.compileContextPlan(run, turnIndex, sections, includeMemory);
+
+    const afterCompile = await this.runHooks('afterContextCompile', {
+      runId: run.id,
+      agentId: this.definition.id,
+      turnIndex,
+      plan,
+    }, { runId: run.id, turnIndex });
+    if (afterCompile.override === 'deny') {
+      throw new Error(`Compiled context rejected by hook: ${afterCompile.reasons.join('; ')}`);
+    }
+
+    return plan;
+  }
+
+  /** Gather the auxiliary context sections (run state, budget, payments, tools, memory, workspace). */
+  private async assembleContextSections(
+    run: Run,
+    turnIndex: number,
+  ): Promise<{ sections: ContextSectionInput[]; includeMemory: boolean }> {
     const sections: ContextSectionInput[] = [];
 
     const runState = this.serializeRunState(run, turnIndex);
@@ -3010,20 +3079,20 @@ export class AgentRuntime {
     const workspaceSections = await this.buildWorkspaceStateSections();
     sections.push(...workspaceSections);
 
-    const beforeCompile = await this.runHooks('beforeContextCompile', {
-      runId: run.id,
-      agentId: this.definition.id,
-      turnIndex,
-      sections,
-    }, { runId: run.id, turnIndex });
-    if (beforeCompile.override === 'deny') {
-      throw new Error(`Context compilation denied by hook: ${beforeCompile.reasons.join('; ')}`);
-    }
+    return { sections, includeMemory: memorySections.length > 0 };
+  }
 
+  /** Compile the context plan (with homeostatic compaction when configured). */
+  private async compileContextPlan(
+    run: Run,
+    turnIndex: number,
+    sections: ContextSectionInput[],
+    includeMemory: boolean,
+  ): Promise<ContextPlan> {
     const compileOptions = {
       maxTokens: this.estimateContextBudget(run),
       sections,
-      includeMemory: memorySections.length > 0,
+      includeMemory,
       includeTools: this.tools.getAll().length > 0,
       includeHistory: run.turns.length > 0,
       maxHistoryTurns: DEFAULT_HISTORY_TURNS,
@@ -3077,16 +3146,6 @@ export class AgentRuntime {
       plan = homeoPlan;
     } else {
       plan = this.context.compileWithPolicy(compileOptions, this.retrievalPolicy);
-    }
-
-    const afterCompile = await this.runHooks('afterContextCompile', {
-      runId: run.id,
-      agentId: this.definition.id,
-      turnIndex,
-      plan,
-    }, { runId: run.id, turnIndex });
-    if (afterCompile.override === 'deny') {
-      throw new Error(`Compiled context rejected by hook: ${afterCompile.reasons.join('; ')}`);
     }
 
     return plan;
