@@ -1,6 +1,6 @@
 {
   "name": "@veridex/agents",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Veridex Agent Fabric — TypeScript-first agent runtime with native payments, policy, identity, and trust",
   "license": "MIT",
   "author": "Veridex Team",
