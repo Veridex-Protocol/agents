@@ -150,7 +150,7 @@
   "peerDependencies": {
     "@anthropic-ai/sdk": ">=0.39.0",
     "openai": ">=4.70.0",
-    "@veridex/sdk": "1.1.6",
+    "@veridex/sdk": "1.1.7",
     "@veridex/agentic-payments": "2.0.7",
     "@veridex/agent-security": "0.1.5"
   },
