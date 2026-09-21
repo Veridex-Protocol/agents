@@ -150,9 +150,9 @@
   "peerDependencies": {
     "@anthropic-ai/sdk": ">=0.39.0",
     "openai": ">=4.70.0",
-    "@veridex/sdk": "1.1.5",
+    "@veridex/sdk": "1.1.6",
     "@veridex/agentic-payments": "2.0.7",
-    "@veridex/agent-security": "^0.1.3"
+    "@veridex/agent-security": "0.1.4"
   },
   "peerDependenciesMeta": {
     "@anthropic-ai/sdk": {
@@ -175,7 +175,7 @@
     "@anthropic-ai/sdk": "^0.39.0",
     "@types/node": "^25.5.2",
     "@veridex/agentic-payments": "2.0.7",
-    "@veridex/agent-security": "^0.1.3",
+    "@veridex/agent-security": "0.1.4",
     "openai": "^4.70.0",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0",
